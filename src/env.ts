@@ -18,34 +18,34 @@ export interface EnvOptions {
 
 export function buildEnv(options: EnvOptions): OperationEnv {
   const { registry, context, allowedNamespaces, callMap } = options;
-  const operations = registry.list();
+  const specs = registry.getAllSpecs();
 
   const namespaces: OperationEnv = {};
 
-  for (const operation of operations) {
-    if (allowedNamespaces && !allowedNamespaces.includes(operation.namespace)) {
+  for (const spec of specs) {
+    if (allowedNamespaces && !allowedNamespaces.includes(spec.namespace)) {
       continue;
     }
 
-    if (operation.type === OperationType.SUBSCRIPTION) {
+    if (spec.type === OperationType.SUBSCRIPTION) {
       continue;
     }
 
-    if (!namespaces[operation.namespace]) {
-      namespaces[operation.namespace] = {};
+    if (!namespaces[spec.namespace]) {
+      namespaces[spec.namespace] = {};
     }
 
-    const operationId = `${operation.namespace}.${operation.name}`;
+    const operationId = `${spec.namespace}.${spec.name}`;
 
     if (callMap) {
-      namespaces[operation.namespace][operation.name] = async (input: unknown) => {
+      namespaces[spec.namespace][spec.name] = async (input: unknown) => {
         logger.debug(`Call protocol: ${operationId}`);
         return await callMap.call(operationId, input, {
           parentRequestId: context.requestId,
         });
       };
     } else {
-      namespaces[operation.namespace][operation.name] = async (input: unknown) => {
+      namespaces[spec.namespace][spec.name] = async (input: unknown) => {
         logger.debug(`Executing: ${operationId}`);
         return await registry.execute(operationId, input, context);
       };

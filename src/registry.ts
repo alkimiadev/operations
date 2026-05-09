@@ -1,4 +1,4 @@
-import type { IOperationDefinition, OperationContext, OperationSpec } from "./types.js";
+import type { OperationContext, OperationSpec, OperationHandler, SubscriptionHandler } from "./types.js";
 import { getLogger } from "@logtape/logtape";
 import { Value } from "@alkdev/typebox/value";
 import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
@@ -6,51 +6,75 @@ import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } fro
 const logger = getLogger("operations:registry");
 
 export class OperationRegistry {
-  private operations = new Map<string, IOperationDefinition>();
+  private specs = new Map<string, OperationSpec>();
+  private handlers = new Map<string, OperationHandler | SubscriptionHandler>();
 
-  private getOperationId(operation: IOperationDefinition): string {
-    return `${operation.namespace}.${operation.name}`;
+  private opId(namespace: string, name: string): string {
+    return `${namespace}.${name}`;
   }
 
-  register(operation: IOperationDefinition): void {
-    const opId = `${operation.namespace}.${operation.name}`;
-    assertIsSchema(operation.inputSchema, `${opId} inputSchema`);
-    assertIsSchema(operation.outputSchema, `${opId} outputSchema`);
-    const id = this.getOperationId(operation);
-    this.operations.set(id, operation);
+  register(operation: OperationSpec & { handler?: OperationHandler | SubscriptionHandler }): void {
+    const id = this.opId(operation.namespace, operation.name);
+    assertIsSchema(operation.inputSchema, `${id} inputSchema`);
+    assertIsSchema(operation.outputSchema, `${id} outputSchema`);
+    const { handler, ...spec } = operation;
+    this.specs.set(id, spec);
+    if (handler) {
+      this.handlers.set(id, handler);
+    }
     logger.info(`Registered operation: ${id}`);
   }
 
-  registerAll(operations: IOperationDefinition[]): void {
+  registerAll(operations: Array<OperationSpec & { handler?: OperationHandler | SubscriptionHandler }>): void {
     for (const op of operations) {
       this.register(op);
     }
   }
 
-  get(id: string): IOperationDefinition | undefined {
-    return this.operations.get(id);
+  registerSpec(spec: OperationSpec): void {
+    const id = this.opId(spec.namespace, spec.name);
+    assertIsSchema(spec.inputSchema, `${id} inputSchema`);
+    assertIsSchema(spec.outputSchema, `${id} outputSchema`);
+    this.specs.set(id, spec);
+    logger.info(`Registered spec: ${id}`);
   }
 
-  getByName(namespace: string, name: string): IOperationDefinition | undefined {
-    return this.operations.get(`${namespace}.${name}`);
+  registerHandler(id: string, handler: OperationHandler | SubscriptionHandler): void {
+    if (!this.specs.has(id)) {
+      throw new Error(`Cannot register handler for unknown operation: ${id}`);
+    }
+    this.handlers.set(id, handler);
+    logger.info(`Registered handler: ${id}`);
   }
 
-  list(): IOperationDefinition[] {
-    return Array.from(this.operations.values());
-  }
-
-  private extractSpec(operation: IOperationDefinition): OperationSpec {
-    const { handler: _handler, ...spec } = operation;
-    return spec;
+  get(id: string): (OperationSpec & { handler?: OperationHandler | SubscriptionHandler }) | undefined {
+    const spec = this.specs.get(id);
+    if (!spec) return undefined;
+    const handler = this.handlers.get(id);
+    return { ...spec, handler };
   }
 
   getSpec(id: string): OperationSpec | undefined {
-    const operation = this.operations.get(id);
-    return operation ? this.extractSpec(operation) : undefined;
+    return this.specs.get(id);
+  }
+
+  getHandler(id: string): OperationHandler | SubscriptionHandler | undefined {
+    return this.handlers.get(id);
+  }
+
+  getByName(namespace: string, name: string): (OperationSpec & { handler?: OperationHandler | SubscriptionHandler }) | undefined {
+    return this.get(this.opId(namespace, name));
+  }
+
+  list(): Array<OperationSpec & { handler?: OperationHandler | SubscriptionHandler }> {
+    return Array.from(this.specs.entries()).map(([id, spec]) => ({
+      ...spec,
+      handler: this.handlers.get(id),
+    }));
   }
 
   getAllSpecs(): OperationSpec[] {
-    return this.list().map(op => this.extractSpec(op));
+    return Array.from(this.specs.values());
   }
 
   async execute<TInput = unknown, TOutput = unknown>(
@@ -58,17 +82,21 @@ export class OperationRegistry {
     input: TInput,
     context: OperationContext,
   ): Promise<TOutput> {
-    const operation = this.operations.get(operationId);
-
-    if (!operation) {
+    const spec = this.specs.get(operationId);
+    if (!spec) {
       throw new Error(`Operation not found: ${operationId}`);
     }
 
-    validateOrThrow(operation.inputSchema, input, `Input validation failed for ${operationId}`);
+    const handler = this.handlers.get(operationId);
+    if (!handler) {
+      throw new Error(`No handler registered for operation: ${operationId}`);
+    }
 
-    const result = await operation.handler(input, context) as TOutput;
+    validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);
 
-    const errors = collectErrors(operation.outputSchema, result);
+    const result = await handler(input, context) as TOutput;
+
+    const errors = collectErrors(spec.outputSchema, result);
     if (errors.length > 0) {
       logger.warn(`Output validation failed for ${operationId}:\n${formatValueErrors(errors)}`);
     }

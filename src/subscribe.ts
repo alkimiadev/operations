@@ -1,4 +1,4 @@
-import type { IOperationDefinition, OperationContext } from "./types.js";
+import type { OperationContext } from "./types.js";
 import { OperationRegistry } from "./registry.js";
 
 export async function* subscribe(
@@ -7,13 +7,18 @@ export async function* subscribe(
   input: unknown,
   context: OperationContext,
 ): AsyncGenerator<unknown, void, unknown> {
-  const operation = registry.get(operationId);
+  const spec = registry.getSpec(operationId);
 
-  if (!operation) {
+  if (!spec) {
     throw new Error(`Operation not found: ${operationId}`);
   }
 
-  const handler = operation.handler;
+  const handler = registry.getHandler(operationId);
+
+  if (!handler) {
+    throw new Error(`No handler registered for operation: ${operationId}`);
+  }
+
   const generator = handler(input, context) as AsyncGenerator<unknown, void, unknown>;
 
   try {

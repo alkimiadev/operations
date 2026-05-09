@@ -1,6 +1,6 @@
 import * as Type from "@alkdev/typebox";
 import { FromSchema } from "./from_schema.js";
-import { OperationType, type IOperationDefinition, type OperationHandler, type OperationContext } from "./types.js";
+import { OperationType, type OperationSpec, type OperationHandler, type OperationContext } from "./types.js";
 
 export interface OpenAPIFS {
   readFile(path: string): Promise<string>;
@@ -225,7 +225,7 @@ function createHTTPOperation(
   method: string,
   path: string,
   config: HTTPServiceConfig,
-): IOperationDefinition {
+): OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> } {
   const operationId = normalizeOperationId(operation, method, path);
   const opType = detectOperationType(method, operation);
   const authHeaders = getAuthHeaders(config);
@@ -298,8 +298,8 @@ function createHTTPOperation(
   };
 }
 
-export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): IOperationDefinition[] {
-  const operations: IOperationDefinition[] = [];
+export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }> {
+  const operations: Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }> = [];
   const basePath = spec.basePath || "";
 
   for (const [path, methods] of Object.entries(spec.paths)) {
@@ -320,7 +320,7 @@ export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): IOper
   return operations;
 }
 
-export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, fs?: OpenAPIFS): Promise<IOperationDefinition[]> {
+export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, fs?: OpenAPIFS): Promise<Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }>> {
   let content: string;
   if (fs) {
     content = await fs.readFile(path);
@@ -332,7 +332,7 @@ export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, f
   return FromOpenAPI(spec, config);
 }
 
-export async function FromOpenAPIUrl(url: string, config: HTTPServiceConfig): Promise<IOperationDefinition[]> {
+export async function FromOpenAPIUrl(url: string, config: HTTPServiceConfig): Promise<Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }>> {
   const response = await fetch(url);
   const spec = await response.json() as OpenAPISpec;
   return FromOpenAPI(spec, config);

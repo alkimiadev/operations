@@ -4,7 +4,7 @@ import { getLogger } from "@logtape/logtape";
 import { OperationRegistry } from "./registry.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
 import { validateOrThrow } from "./validation.js";
-import type { IOperationDefinition, Identity, OperationContext, AccessControl } from "./types.js";
+import type { Identity, OperationContext, AccessControl, OperationSpec } from "./types.js";
 
 const logger = getLogger("operations:call");
 
@@ -45,10 +45,10 @@ export type CallEventMapValue = CallRequestedEvent | CallRespondedEvent | CallAb
 export const CallEventMap = CallEventSchema;
 
 type CallPubSubMap = {
-  "call.requested": [CallRequestedEvent];
-  "call.responded": [CallRespondedEvent];
-  "call.aborted": [CallAbortedEvent];
-  "call.error": [CallErrorEvent];
+  "call.requested": CallRequestedEvent;
+  "call.responded": CallRespondedEvent;
+  "call.aborted": CallAbortedEvent;
+  "call.error": CallErrorEvent;
 };
 
 interface PendingRequest {
@@ -77,10 +77,10 @@ export class PendingRequestMap {
   }
 
   private setupSubscriptions(): void {
-    const respondedIter = this.pubsub.subscribe("call.responded");
+    const respondedIter = this.pubsub.subscribe("call.responded", "");
     (async () => {
-      for await (const event of respondedIter) {
-        const responded = event as CallRespondedEvent;
+      for await (const envelope of respondedIter) {
+        const responded = envelope.payload;
         const pending = this.requests.get(responded.requestId);
         if (pending) {
           if (pending.timer) clearTimeout(pending.timer);
@@ -90,10 +90,10 @@ export class PendingRequestMap {
       }
     })();
 
-    const errorIter = this.pubsub.subscribe("call.error");
+    const errorIter = this.pubsub.subscribe("call.error", "");
     (async () => {
-      for await (const event of errorIter) {
-        const err = event as CallErrorEvent;
+      for await (const envelope of errorIter) {
+        const err = envelope.payload;
         const pending = this.requests.get(err.requestId);
         if (pending) {
           if (pending.timer) clearTimeout(pending.timer);
@@ -103,10 +103,10 @@ export class PendingRequestMap {
       }
     })();
 
-    const abortedIter = this.pubsub.subscribe("call.aborted");
+    const abortedIter = this.pubsub.subscribe("call.aborted", "");
     (async () => {
-      for await (const event of abortedIter) {
-        const aborted = event as CallAbortedEvent;
+      for await (const envelope of abortedIter) {
+        const aborted = envelope.payload;
         const pending = this.requests.get(aborted.requestId);
         if (pending) {
           if (pending.timer) clearTimeout(pending.timer);
@@ -137,7 +137,7 @@ export class PendingRequestMap {
 
       this.requests.set(requestId, pending);
 
-      this.pubsub.publish("call.requested", {
+      this.pubsub.publish("call.requested", "", {
         requestId,
         operationId,
         input,
@@ -149,14 +149,14 @@ export class PendingRequestMap {
   }
 
   respond(requestId: string, output: unknown): void {
-    this.pubsub.publish("call.responded", {
+    this.pubsub.publish("call.responded", "", {
       requestId,
       output,
     });
   }
 
   emitError(requestId: string, code: string, message: string, details?: unknown): void {
-    this.pubsub.publish("call.error", {
+    this.pubsub.publish("call.error", "", {
       requestId,
       code,
       message,
@@ -169,7 +169,7 @@ export class PendingRequestMap {
     if (pending) {
       if (pending.timer) clearTimeout(pending.timer);
       this.requests.delete(requestId);
-      this.pubsub.publish("call.aborted", { requestId });
+      this.pubsub.publish("call.aborted", "", { requestId });
       pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${requestId} was aborted`));
     }
   }
@@ -186,9 +186,9 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
     const { requestId, operationId, input, identity } = event;
 
     try {
-      const operation = registry.get(operationId);
+      const spec = registry.getSpec(operationId);
 
-      if (!operation) {
+      if (!spec) {
         throw new CallError(
           InfrastructureErrorCode.OPERATION_NOT_FOUND,
           `Operation not found: ${operationId}`,
@@ -196,7 +196,16 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
         );
       }
 
-      const accessControl: AccessControl = operation.accessControl as AccessControl;
+      const handler = registry.getHandler(operationId);
+      if (!handler) {
+        throw new CallError(
+          InfrastructureErrorCode.OPERATION_NOT_FOUND,
+          `No handler registered for operation: ${operationId}`,
+          { operationId },
+        );
+      }
+
+      const accessControl: AccessControl = spec.accessControl as AccessControl;
 
       if (identity && !checkAccess(accessControl, identity)) {
         throw new CallError(
@@ -212,9 +221,9 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
         identity,
       };
 
-      validateOrThrow(operation.inputSchema, input, `Input validation for ${operationId}`);
+      validateOrThrow(spec.inputSchema, input, `Input validation for ${operationId}`);
 
-      await operation.handler(input, context);
+      await handler(input, context);
 
     } catch (error) {
       const callError = mapError(error);

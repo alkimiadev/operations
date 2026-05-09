@@ -1,4 +1,4 @@
-export { OperationType, OperationContextSchema, OperationDefinitionSchema, OperationSpecSchema, AccessControlSchema, ErrorDefinitionSchema } from "./types.js";
+export { OperationType, OperationContextSchema, OperationSpecSchema, AccessControlSchema, ErrorDefinitionSchema } from "./types.js";
 export type { IOperationDefinition, OperationHandler, SubscriptionHandler, Identity, OperationEnv, OperationContext, OperationSpec, AccessControl, ErrorDefinition } from "./types.js";
 export { OperationRegistry } from "./registry.js";
 export { formatValueErrors, assertIsSchema, validateOrThrow, collectErrors } from "./validation.js";

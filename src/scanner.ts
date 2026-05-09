@@ -1,5 +1,5 @@
-import type { IOperationDefinition } from "./types.js";
-import { OperationDefinitionSchema } from "./types.js";
+import type { OperationSpec } from "./types.js";
+import { OperationSpecSchema } from "./types.js";
 import { collectErrors, formatValueErrors } from "./validation.js";
 import { getLogger } from "@logtape/logtape";
 
@@ -11,15 +11,15 @@ export interface ScannerFS {
 }
 
 export interface OperationManifest {
-  operations: Record<string, IOperationDefinition>;
+  operations: Record<string, OperationSpec>;
   baseUrl?: string;
 }
 
 export async function scanOperations(
   dirPath: string,
   fs: ScannerFS,
-): Promise<IOperationDefinition[]> {
-  const operations: IOperationDefinition[] = [];
+): Promise<OperationSpec[]> {
+  const operations: OperationSpec[] = [];
 
   try {
     await processDirectory(dirPath, operations, fs);
@@ -37,7 +37,7 @@ export async function scanOperations(
 
 async function processDirectory(
   dirPath: string,
-  operations: IOperationDefinition[],
+  operations: OperationSpec[],
   fs: ScannerFS,
 ): Promise<void> {
   try {
@@ -53,9 +53,9 @@ async function processDirectory(
           const module = await import(moduleUrl);
 
           if (module.default) {
-            const operation = module.default as IOperationDefinition;
+            const operation = module.default as OperationSpec;
 
-            const errors = collectErrors(OperationDefinitionSchema, operation);
+            const errors = collectErrors(OperationSpecSchema, operation);
 
             if (errors.length > 0) {
               logger.warn(`${fullPath}: Invalid operation definition - ${formatValueErrors(errors, "")}`);

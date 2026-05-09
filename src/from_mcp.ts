@@ -1,4 +1,4 @@
-import type { IOperationDefinition } from "./types.js";
+import type { OperationSpec, OperationHandler, OperationContext } from "./types.js";
 import { OperationType } from "./types.js";
 import { Type, type TSchema } from "@alkdev/typebox";
 import { FromSchema } from "./from_schema.js";
@@ -18,7 +18,7 @@ export interface MCPClientConfig {
 export interface MCPClientWrapper {
   name: string;
   client: unknown;
-  tools: IOperationDefinition[];
+  tools: Array<OperationSpec & { handler: OperationHandler }>;
 }
 
 export async function createMCPClient(
@@ -54,7 +54,7 @@ export async function createMCPClient(
   logger.info(`Connected to MCP server: ${name}`);
 
   const toolsResult = await client.listTools();
-  const operations: IOperationDefinition[] = toolsResult.tools.map((tool: { name: string; description?: string; inputSchema: unknown }) => {
+  const operations: Array<OperationSpec & { handler: OperationHandler }> = toolsResult.tools.map((tool: { name: string; description?: string; inputSchema: unknown }) => {
     return {
       name: tool.name,
       namespace: name,
@@ -78,7 +78,7 @@ export async function createMCPClient(
 
         return result.content;
       },
-    } satisfies IOperationDefinition;
+    } satisfies OperationSpec & { handler: OperationHandler };
   });
 
   return {
@@ -126,8 +126,8 @@ export class MCPClientLoader {
     return Array.from(this.clients.values());
   }
 
-  getAllOperations(): IOperationDefinition[] {
-    const allOps: IOperationDefinition[] = [];
+  getAllOperations(): Array<OperationSpec & { handler: OperationHandler }> {
+    const allOps: Array<OperationSpec & { handler: OperationHandler }> = [];
     for (const wrapper of this.clients.values()) {
       for (const op of wrapper.tools) {
         allOps.push(op);
