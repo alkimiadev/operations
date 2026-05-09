@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 ---
 
 # @alkdev/operations Architecture
@@ -18,7 +18,7 @@ Extracted from `@alkdev/alkhub_ts/packages/core/operations/` and `packages/core/
 
 ## Core Principle
 
-**The operation definition is the contract.** Every API endpoint, agent action, coordination tool, and MCP tool is an `IOperationDefinition` with typed input/output schemas, access control, and a handler. The registry executes them. The call protocol routes them. Adapters generate them from external specs.
+**The spec is the contract; the handler is the runtime.** Every API endpoint, agent action, coordination tool, and MCP tool has an `OperationSpec` (serializable, hashable descriptor) and optionally a handler function. The registry stores specs and handlers separately — they can be registered together with `register()` or independently with `registerSpec()` and `registerHandler()`. The call protocol routes invocations through specs. Adapters generate specs (and handlers) from external definitions.
 
 All paths funnel into the same registry:
 
@@ -34,8 +34,8 @@ Access control, validation, and error handling are consistent regardless of entr
 
 ## What This Package Provides
 
-- **Core types** — `IOperationDefinition`, `OperationSpec`, `OperationType`, `AccessControl`, `Identity`, `OperationContext`
-- **Registry** — `OperationRegistry` with register, execute, validate, spec extraction
+- **Core types** — `OperationSpec`, `IOperationDefinition`, `OperationType`, `AccessControl`, `Identity`, `OperationContext`, `OperationHandler`, `SubscriptionHandler`
+- **Registry** — `OperationRegistry` with `register`, `registerSpec`, `registerHandler`, `execute`, `getSpec`, `getHandler`, spec extraction
 - **Call protocol** — `PendingRequestMap`, `CallHandler`, `call≡subscribe` event semantics
 - **Subscribe** — `subscribe()` for `AsyncGenerator`-based subscription operations
 - **Env builder** — `buildEnv()` for nested operation calls (direct or call protocol mode)

@@ -74,9 +74,10 @@ Runtime-agnostic TypeScript package for typed operations registry, call protocol
 
 See `docs/architecture/` for full specs. Key points:
 
-- **Operations**: Everything is a typed operation with TypeBox schemas. `IOperationDefinition` defines name, namespace, type (QUERY/MUTATION/SUBSCRIPTION), input/output schemas, access control, and handler.
+- **Operations**: Everything is a typed operation with TypeBox schemas. `OperationSpec` is the serializable descriptor; handlers are registered separately via `registerHandler()`. `IOperationDefinition` combines both for convenience.
 - **Call protocol**: `call ≡ subscribe` — same event types, same PendingRequestMap. A call resolves after one event; a subscription stays open and yields events until stopped. Same message format, different consumption pattern.
-- **PendingRequestMap**: Full call protocol implementation with pubsub wiring, `call()`, `subscribe()`, deadline timeout.
+- **PendingRequestMap**: Full call protocol implementation with pubsub wiring, `call()`, `respond()`, `emitError()`, `abort()`, deadline timeout. Uses `@alkdev/pubsub@0.1.0` with `subscribe(type, id)` and `EventEnvelope` wrapping.
+- **Registry**: Separates specs from handlers. `registerSpec()` and `registerHandler()` for independent registration; `register()` for combined. `execute()` requires both spec and handler.
 - **Adapters**: `from_openapi`, `from_schema`, `from_mcp` register remote operations in the registry. MCP and OpenAPI are peer-dep adapters.
 - **Logger**: Direct `@logtape/logtape` import, no wrapper.
 - **No Effect**: Plain async/await throughout.
@@ -87,11 +88,11 @@ See `docs/architecture/` for full specs. Key points:
 ```
 src/
   index.ts            — Public API surface (all exports)
-  types.ts            — IOperationDefinition, OperationType, CallEventMap
-  registry.ts         — OperationRegistry (register, execute, subscribe)
+  types.ts            — OperationSpec, IOperationDefinition, OperationType, CallEventMap, OperationHandler, SubscriptionHandler
+  registry.ts         — OperationRegistry (register, registerSpec, registerHandler, execute, getSpec, getHandler)
   validation.ts       — Input/output schema validation
-  call.ts             — PendingRequestMap, call(), subscribe(), CallHandler
-  subscribe.ts        — Subscription support (AsyncIterable operations)
+  call.ts             — PendingRequestMap, call(), respond(), emitError(), abort(), CallHandler
+  subscribe.ts        — Subscription support (AsyncIterable operations, uses getSpec+getHandler)
   error.ts            — CallError, mapError, infrastructure codes
   env.ts              — OperationEnvironment
   scanner.ts          — Auto-discover operations from filesystem (Deno/Node agnostic)
@@ -119,13 +120,13 @@ Dev: `tsup`, `typescript`, `vitest`, `@vitest/coverage-v8`
 | Module | Origin | Status |
 |--------|--------|--------|
 | types.ts | Copied from `alkhub_ts/packages/core/operations/types.ts` | Migrating |
-| registry.ts | Copied from `alkhub_ts/packages/core/operations/registry.ts` | Migrating |
+| registry.ts | Copied from `alkhub_ts/packages/core/operations/registry.ts` | Migrating, handler separation added |
 | validation.ts | Copied from `alkhub_ts/packages/core/operations/validation.ts` | Migrating |
-| env.ts | Copied from `alkhub_ts/packages/core/operations/env.ts` | Migrating, needs PendingRequestMap impl |
-| scanner.ts | Copied from `alkhub_ts/packages/core/operations/scanner.ts` | Migrating, needs fs injection |
+| env.ts | Copied from `alkhub_ts/packages/core/operations/env.ts` | Migrating, uses getAllSpecs() |
+| scanner.ts | Copied from `alkhub_ts/packages/core/operations/scanner.ts` | Migrating, validates against OperationSpecSchema |
 | from_schema.ts | Copied from `alkhub_ts/packages/core/operations/from_schema.ts` | Migrating |
 | from_openapi.ts | Copied from `alkhub_ts/packages/core/operations/from_openapi.ts` | Migrating, needs env+fs injection |
 | from_mcp.ts | Copied from `alkhub_ts/packages/core/mcp/wrapper.ts` + `loader.ts` | Migrating, needs path+dep updates |
-| call.ts | New | Not started |
-| subscribe.ts | New | Not started |
-| error.ts | New | Not started |
+| call.ts | New | Implemented, pubsub@0.1.0 integrated |
+| subscribe.ts | New | Implemented, uses getSpec+getHandler |
+| error.ts | New | Implemented |

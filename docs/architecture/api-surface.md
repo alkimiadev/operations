@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 ---
 
 # API Surface
@@ -103,7 +103,7 @@ interface OperationSpec<TInput = unknown, TOutput = unknown> {
 }
 ```
 
-Serializable, hashable subset of an operation definition. No handler — safe to send over the wire.
+Serializable, hashable descriptor. No handler — safe to send over the wire, persist, or use as a template for ujsx tree interpretation. `Value.Hash(inputSchema)` provides structural deduplication keys.
 
 ### `IOperationDefinition`
 
@@ -113,7 +113,7 @@ interface IOperationDefinition<TInput, TOutput, TContext> extends OperationSpec<
 }
 ```
 
-Full definition including the runtime handler. Registered with `OperationRegistry`.
+Convenience type combining spec and handler. Still supported by `register()` for backward compatibility, but the registry now stores them separately internally.
 
 ### `OperationHandler` / `SubscriptionHandler`
 
@@ -141,18 +141,25 @@ Namespace-keyed operation map. Accessed as `env.namespace.operationName(input)`.
 
 ### `OperationRegistry`
 
+The registry stores specs and handlers in separate internal maps. Specs are serializable descriptors; handlers are runtime functions. They can be registered together or separately.
+
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `register(operation)` | `(operation: IOperationDefinition) => void` | Register by `{namespace}.{name}` key. Validates schemas. |
-| `registerAll(operations)` | `(operations: IOperationDefinition[]) => void` | Bulk register. |
-| `get(id)` | `(id: string) => IOperationDefinition \| undefined` | Get by full id (`"namespace.name"`). |
-| `getByName(namespace, name)` | `(namespace: string, name: string) => IOperationDefinition \| undefined` | Get by parts. |
-| `list()` | `() => IOperationDefinition[]` | All registered operations. |
+| `register(operation)` | `(operation: OperationSpec & { handler?: OperationHandler \| SubscriptionHandler }) => void` | Register spec + optional handler by `{namespace}.{name}` key. Validates schemas. |
+| `registerAll(operations)` | `(operations: Array<OperationSpec & { handler?: ... }>) => void` | Bulk register. |
+| `registerSpec(spec)` | `(spec: OperationSpec) => void` | Register spec only (no handler). Validates schemas. |
+| `registerHandler(id, handler)` | `(id: string, handler: OperationHandler \| SubscriptionHandler) => void` | Register handler for existing spec. Throws if spec not found. |
+| `get(id)` | `(id: string) => (OperationSpec & { handler?: ... }) \| undefined` | Get spec + handler (if registered) by full id. |
 | `getSpec(id)` | `(id: string) => OperationSpec \| undefined` | Serializable spec (no handler). |
+| `getHandler(id)` | `(id: string) => OperationHandler \| SubscriptionHandler \| undefined` | Handler only. `undefined` if spec registered without handler. |
+| `getByName(namespace, name)` | `(namespace: string, name: string) => (OperationSpec & { handler?: ... }) \| undefined` | Get by parts. |
+| `list()` | `() => Array<OperationSpec & { handler?: ... }>` | All registered entries (spec + handler if present). |
 | `getAllSpecs()` | `() => OperationSpec[]` | All serializable specs. |
-| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<TOutput>` | Validate input, run handler, warn on output mismatch. Throws if not found or validation fails. |
+| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<TOutput>` | Validate input, run handler, warn on output mismatch. Throws if spec or handler not found. |
 
 Registration key format: `{namespace}.{name}`. Overwrite on duplicate.
+
+Specs and handlers can be registered independently: `registerSpec()` then `registerHandler()` for the same id, or `register()` with `{ ...spec, handler }` in one call. `execute()` requires both — throws `"Operation not found"` if spec missing, `"No handler registered"` if handler missing.
 
 `execute` validates input with `validateOrThrow` before calling the handler. Output validation uses `collectErrors` and logs warnings — it does not throw.
 
@@ -305,10 +312,10 @@ See [adapters.md](adapters.md) for detailed adapter documentation.
 
 | Adapter | Import | Description |
 |---------|--------|-------------|
-| `FromOpenAPI` | Main barrel | OpenAPI spec → `IOperationDefinition[]` |
-| `FromOpenAPIFile` | Main barrel | OpenAPI file → `IOperationDefinition[]` |
-| `FromOpenAPIUrl` | Main barrel | OpenAPI URL → `IOperationDefinition[]` |
+| `FromOpenAPI` | Main barrel | OpenAPI spec → `OperationSpec & { handler }[]` |
+| `FromOpenAPIFile` | Main barrel | OpenAPI file → `OperationSpec & { handler }[]` |
+| `FromOpenAPIUrl` | Main barrel | OpenAPI URL → `OperationSpec & { handler }[]` |
 | `createMCPClient` | `from-mcp` sub-path | MCP server → `MCPClientWrapper` with tool operations |
 | `closeMCPClient` | `from-mcp` sub-path | Close MCP client connection |
 | `MCPClientLoader` | `from-mcp` sub-path | Manage multiple MCP servers |
-| `scanOperations` | Main barrel | Filesystem auto-discovery of operation definitions |
+| `scanOperations` | Main barrel | Filesystem auto-discovery of operation specs |

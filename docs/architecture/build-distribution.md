@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 ---
 
 # Build & Distribution
@@ -14,7 +14,7 @@ Dependencies, project structure, sub-path exports, peer deps, and build tooling.
 | Package | Purpose |
 |---------|---------|
 | `@alkdev/typebox` | Schema system. `Type` for building schemas, `Value` for validation, `KindGuard` for schema assertion. |
-| `@alkdev/pubsub` | Call protocol transport. `PendingRequestMap` creates an internal `PubSub` for event routing. |
+| `@alkdev/pubsub` | Call protocol transport. `PendingRequestMap` creates an internal `PubSub` for event routing. Uses `subscribe(type, id)` and `publish(type, id, payload)` API with `EventEnvelope` wrapping. |
 | `@logtape/logtape` | Structured logging. Direct import, no wrapper. See [ADR-001](decisions/001-logger-direct-import.md). |
 
 ### Peer (Optional)
@@ -41,7 +41,7 @@ Dependencies, project structure, sub-path exports, peer deps, and build tooling.
   src/
     index.ts            # Barrel: re-exports all public API
     types.ts            # Core types: IOperationDefinition, OperationSpec, OperationType, etc.
-    registry.ts         # OperationRegistry: register, execute, get, list
+    registry.ts         # OperationRegistry: registerSpec, registerHandler, execute, get, list
     validation.ts       # assertIsSchema, validateOrThrow, collectErrors, formatValueErrors
     call.ts             # PendingRequestMap, buildCallHandler, CallEventMap, event types
     subscribe.ts        # subscribe(): direct AsyncGenerator execution

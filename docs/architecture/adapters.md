@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 ---
 
 # Adapters
@@ -14,7 +14,7 @@ How `FromSchema`, `FromOpenAPI`, `from_mcp`, and `scanner` work. How to add new 
 
 ### Purpose
 
-Converts JSON Schema to TypeBox `TSchema`. Required because `IOperationDefinition.inputSchema` and `outputSchema` must be TypeBox schemas (for `Value.Check` validation), but external specs (OpenAPI, MCP) provide JSON Schema.
+Converts JSON Schema to TypeBox `TSchema`. Required because `OperationSpec.inputSchema` and `outputSchema` must be TypeBox schemas (for `Value.Check` validation), but external specs (OpenAPI, MCP) provide JSON Schema. In the future, `@alkdev/typemap` may replace or supplement `FromSchema` to support Zod and Valibot input schemas as well.
 
 ### Conversion Rules
 
@@ -57,12 +57,12 @@ const typeboxSchema = FromSchema({
 
 ### Purpose
 
-Generates `IOperationDefinition[]` from OpenAPI specs. Each path+method combination becomes an operation with an auto-generated `fetch` handler.
+Generates `OperationSpec & { handler }[]` from OpenAPI specs. Each path+method combination becomes an operation with an auto-generated `fetch` handler.
 
 ### `FromOpenAPI(spec, config)`
 
 ```ts
-function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): IOperationDefinition[]
+function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: OperationHandler }>
 ```
 
 Processes all paths in the spec. For each path and method combination:
@@ -86,7 +86,7 @@ async function FromOpenAPIFile(
   path: string,
   config: HTTPServiceConfig,
   fs?: OpenAPIFS,
-): Promise<IOperationDefinition[]>
+): Promise<Array<OperationSpec & { handler: OperationHandler }>>
 ```
 
 Reads an OpenAPI JSON file. If `fs` is provided, uses `fs.readFile()` (runtime-agnostic). Otherwise, uses Node.js `node:fs/promises`.
@@ -97,7 +97,7 @@ Reads an OpenAPI JSON file. If `fs` is provided, uses `fs.readFile()` (runtime-a
 async function FromOpenAPIUrl(
   url: string,
   config: HTTPServiceConfig,
-): Promise<IOperationDefinition[]>
+): Promise<Array<OperationSpec & { handler: OperationHandler }>>
 ```
 
 Fetches an OpenAPI JSON spec from a URL.
@@ -151,7 +151,7 @@ Injectable filesystem interface for runtime-agnostic file reading. See [ADR-002]
 
 ### Purpose
 
-Connects to MCP (Model Context Protocol) servers and wraps their tools as `IOperationDefinition[]`. Supports both stdio and HTTP transports.
+Connects to MCP (Model Context Protocol) servers and wraps their tools as `OperationSpec & { handler }[]`. Supports both stdio and HTTP transports.
 
 ### `createMCPClient(name, config)`
 
@@ -166,7 +166,7 @@ async function createMCPClient(
 2. Create transport: `StreamableHTTPClientTransport` for `url` config, `StdioClientTransport` for `command` config
 3. Connect the client
 4. Call `client.listTools()` to discover available tools
-5. For each tool, create an `IOperationDefinition`:
+5. For each tool, create a `OperationSpec & { handler }`:
    - `name`: tool name
    - `namespace`: the `name` parameter (used as grouping)
    - `type`: `MUTATION` (all MCP tools are mutations)
@@ -197,7 +197,7 @@ class MCPClientLoader {
   async load(config: Record<string, MCPClientConfig>): Promise<MCPClientWrapper[]>
   getClient(name: string): MCPClientWrapper | undefined
   getAllWrappers(): MCPClientWrapper[]
-  getAllOperations(): IOperationDefinition[]
+  getAllOperations(): Array<OperationSpec & { handler: OperationHandler }>
   async closeAll(): Promise<void>
 }
 ```
@@ -215,7 +215,7 @@ Manages multiple MCP client connections. `load()` connects to all configured ser
 
 ### Purpose
 
-Auto-discovers operation definitions from the filesystem. Recursively scans `.ts` files, imports them, and validates that the default export satisfies `OperationDefinitionSchema`.
+Auto-discovers operation specs from the filesystem. Recursively scans `.ts` files, imports them, and validates that the default export satisfies `OperationSpecSchema`. Handlers must be registered separately via `registry.registerHandler()`.
 
 ### `scanOperations(dirPath, fs)`
 
@@ -223,14 +223,16 @@ Auto-discovers operation definitions from the filesystem. Recursively scans `.ts
 async function scanOperations(
   dirPath: string,
   fs: ScannerFS,
-): Promise<IOperationDefinition[]>
+): Promise<OperationSpec[]>
 ```
 
 1. Walk directory tree using `fs.readdir()`
 2. For each `.ts` file, construct a `file://` URL and dynamic `import()`
-3. If the module has a default export, validate it against `OperationDefinitionSchema` using `collectErrors`
-4. Valid operations are added to the result array; invalid ones log a warning and are skipped
+3. If the module has a default export, validate it against `OperationSpecSchema` using `collectErrors`
+4. Valid specs are added to the result array; invalid ones log a warning and are skipped
 5. Directories are recursed
+
+Note: The scanner validates against `OperationSpecSchema` (no handler field). If a scanned module exports both spec and handler, use `registry.register()` instead.
 
 ### `ScannerFS`
 
@@ -244,6 +246,8 @@ interface ScannerFS {
 Injectable filesystem interface. No `Deno.*` globals or Node-specific imports in the scanner source. The consumer provides the FS implementation. See [ADR-002](decisions/002-fs-injection.md).
 
 ### Expected Module Shape
+
+#### Spec + handler together (legacy, still supported)
 
 ```ts
 // operations/myOperation.ts
@@ -263,18 +267,45 @@ export default {
 } satisfies IOperationDefinition
 ```
 
+#### Spec only (recommended for scanned modules)
+
+```ts
+// operations/myOperation.ts
+import { Type } from "@alkdev/typebox"
+import { OperationType, type OperationSpec } from "@alkdev/operations"
+
+export default {
+  name: "myOperation",
+  namespace: "myapp",
+  version: "1.0.0",
+  type: OperationType.QUERY,
+  description: "Does something useful",
+  inputSchema: Type.Object({ name: Type.String() }),
+  outputSchema: Type.Object({ result: Type.String() }),
+  accessControl: { requiredScopes: ["read"] },
+} satisfies OperationSpec
+```
+
+Then register the handler separately:
+
+```ts
+registry.registerSpec(scannedSpec)
+registry.registerHandler("myapp.myOperation", myHandler)
+```
+
 ## Adding a New Adapter
 
 To add a new adapter (e.g., `from_grpc`):
 
-1. **Create `src/from_grpc.ts`** — implement the adapter that produces `IOperationDefinition[]` from gRPC service definitions
+1. **Create `src/from_grpc.ts`** — implement the adapter that produces `OperationSpec[]` (spec-only) or `Array<OperationSpec & { handler }>` (spec+handler)
 2. **Export from `src/index.ts`** — add named exports to the barrel
 3. **If the adapter has peer dependencies**:
    - Add to `peerDependencies` and `peerDependenciesMeta` in `package.json`
    - Add a sub-path entry in `exports` (e.g., `"./from-grpc"`)
    - Add a separate entry in `tsup.config.ts`
    - See [ADR-003](decisions/003-peer-dep-adapters.md)
-4. **Inject runtime dependencies** — follow the `ScannerFS` / `OpenAPIFS` pattern for any filesystem or platform-specific APIs. See [ADR-002](decisions/002-fs-injection.md)
-5. **Use `FromSchema`** for any JSON Schema → TypeBox conversion needed by the adapter
-6. **Write tests** — test the adapter in isolation, mock external services
-7. **Update architecture docs** — add adapter section here and update the API surface table
+4. **If handlers are provided**, they can be registered alongside specs or separately via `registry.registerHandler()`
+5. **Inject runtime dependencies** — follow the `ScannerFS` / `OpenAPIFS` pattern for any filesystem or platform-specific APIs. See [ADR-002](decisions/002-fs-injection.md)
+6. **Use `FromSchema`** for any JSON Schema → TypeBox conversion needed by the adapter (or `@alkdev/typemap` for Zod/Valibot)
+7. **Write tests** — test the adapter in isolation, mock external services
+8. **Update architecture docs** — add adapter section here and update the API surface table

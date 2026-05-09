@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-04-30
+last_updated: 2026-05-09
 ---
 
 # Call Protocol
@@ -103,6 +103,7 @@ const callMap = new PendingRequestMap(eventTarget?)
 - Creates an internal `PubSub<CallPubSubMap>` using `createPubSub`
 - If `eventTarget` is provided, passes it to `createPubSub` for transport-level event routing (Redis, WebSocket, etc.)
 - Wires subscription handlers for `call.responded`, `call.error`, and `call.aborted` to route events back to waiting callers
+- Subscriptions use empty-string id (`subscribe("call.responded", "")`) to receive all events of each type. Events are unwrapped from `EventEnvelope` via `.payload`
 
 ### `call(operationId, input, options?)`
 
@@ -158,13 +159,15 @@ type CallHandler = (event: CallRequestedEvent) => Promise<void>
 
 ### Handler Flow
 
-1. Look up operation by `operationId` from the registry
+1. Look up spec by `operationId` from the registry via `getSpec()`
 2. If not found, throw `CallError(OPERATION_NOT_FOUND, ...)`
-3. Check access control (see below)
-4. Validate input with `validateOrThrow`
-5. Execute operation handler
-6. On success: the handler is expected to have published `call.responded` through whatever mechanism
-7. On failure: `mapError` converts the thrown value to `CallError`
+3. Look up handler by `operationId` via `getHandler()`
+4. If not found, throw `CallError(OPERATION_NOT_FOUND, "No handler registered for operation: ...")`
+5. Check access control (see below)
+6. Validate input with `validateOrThrow`
+7. Execute operation handler
+8. On success: the handler is expected to have published `call.responded` through whatever mechanism
+9. On failure: `mapError` converts the thrown value to `CallError`
 
 The `CallHandler` is designed to be wired into a pubsub subscription:
 
@@ -281,3 +284,12 @@ async function* subscribe(
 Gets the operation from the registry, casts its handler to `AsyncGenerator`, and yields values. Properly cleans up with `generator.return()` in a `finally` block.
 
 Use `subscribe()` for in-process consumption. Use `PendingRequestMap.call()` for cross-transport invocation that resolves after one event. For cross-transport streaming, use `PendingRequestMap.subscribe()` to yield multiple events.
+
+### Handler Separation
+
+The `subscribe()` function looks up both spec and handler separately from the registry:
+
+1. `registry.getSpec(operationId)` — throws if spec not found
+2. `registry.getHandler(operationId)` — throws if handler not found
+
+This allows spec-only registration for scenarios where handlers are provided separately (e.g., ujsx host interpretation, dynamic handler injection).
