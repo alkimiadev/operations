@@ -5,306 +5,20 @@ last_updated: 2026-05-10
 
 # Response Envelopes
 
-How adapter-produced operations wrap their outputs in structured envelopes, how consumers unwrap them, and how the call protocol carries envelope information through the event layer.
+> **Note**: This spec supersedes the current behavior described in [call-protocol.md](call-protocol.md) and [api-surface.md](api-surface.md). Those documents describe the pre-envelope model where `execute()` returns `TOutput` and handlers publish `call.responded` directly. The migration checklist below tracks the required updates. Until those documents are updated, this spec is the authoritative source for envelope behavior.
+
+Types, factory functions, integration points, and constraints for the `ResponseEnvelope` system. See [ADR-005](decisions/005-response-envelopes.md) for the design rationale.
 
 ## Problem
 
-Every adapter produces operation results in a different wire format:
+Only locally-defined operations return types matching their declared `outputSchema`. MCP operations return `ContentBlock[]` (or `structuredContent` when the tool declares `outputSchema`), OpenAPI operations return raw HTTP response data, and there is no way for consumers to:
 
-- **MCP** returns `CallToolResult` — `{ content: ContentBlock[], structuredContent?: Record<string, unknown>, isError?: boolean }` where `ContentBlock` is a discriminated union (`text`, `image`, `audio`, `resource`).
-- **OpenAPI (HTTP)** returns raw HTTP response bodies — `application/json` → parsed JSON, `text/*` → string, or `ArrayBuffer` for binary. There is no envelope; error information is in the HTTP status code.
-- **Local operations** return whatever the handler function returns — a plain value matching `outputSchema`.
+- Know what source produced a result
+- Access transport metadata (HTTP status, MCP error flags)
+- Compose operations across sources with a uniform interface
+- Access typed data from MCP tools that declare `outputSchema` (spec 2025-06-18+)
 
-Currently the codebase treats all three identically: `outputSchema: Type.Unknown()` for MCP, and for OpenAPI the handler just returns whatever `response.json()` / `.text()` / `.arrayBuffer()` produces. There is no unified way for consumers to:
-
-1. Know *what kind of thing* produced the result (MCP tool? HTTP call? local handler?)
-2. Access metadata about the response (HTTP status, content type, MCP error flags)
-3. Distinguish structured vs. unstructured content within the same result
-4. Handle multi-content responses (MCP arrays) vs. single-value responses (local ops)
-
-This gap forces each consumer to write adapter-specific unwrapping logic, which defeats the purpose of a unified registry.
-
-## Design Decisions
-
-### ADR-005: Response Envelope as a First-Class Concept
-
-**Context**: Operations from different sources produce results in fundamentally different shapes. The registry treats them all as `unknown` output, losing structural information that consumers need.
-
-**Decision**: Introduce a `ResponseEnvelope` type that wraps every operation result with transport metadata. Adapters produce envelopes; consumers unwrap or inspect them.
-
-**Trade-offs**:
-- (+) Consumers get a uniform interface regardless of operation source
-- (+) Envelope-preserving handlers can pass through metadata (HTTP status, MCP content blocks) without losing it
-- (+) Error metadata (MCP `isError`, HTTP status codes) is accessible without ad-hoc conventions
-- (−) Adds a wrapping layer for local operations that don't need it
-- (−) Requires all existing consumers to decide: unwrap or carry the envelope
-
-**Rationale**: The benefit of uniform access outweighs the wrapping cost. Local operations get the simplest envelope (`{ data, meta: { source: "local" } }`); adapters add their own metadata. Consumers that don't care about metadata can use `unwrap()`.
-
----
-
-### ADR-006: Envelope Structure — Flat Data + Typed Metadata
-
-**Context**: Several envelope designs were considered:
-
-1. **Discriminated union per source** — `{ type: "mcp", ...mcpFields } | { type: "http", ...httpFields } | { type: "local", data: T }`
-2. **Generic envelope with typed meta** — `{ data: T, meta: ResponseMeta }` where `ResponseMeta` is a discriminated union
-3. **Adapter-specific envelope per adapter** — each adapter defines its own output type
-
-**Decision**: Option 2 — a generic `ResponseEnvelope<T>` with a `data` field for the actual result and a `meta` field carrying transport-specific metadata.
-
-```ts
-interface ResponseEnvelope<T = unknown> {
-  data: T
-  meta: ResponseMeta
-}
-
-type ResponseMeta =
-  | LocalResponseMeta
-  | HTTPResponseMeta
-  | MCPResponseMeta
-```
-
-**Trade-offs**:
-- (+) Single type to pattern-match on, one `meta.source` to dispatch
-- (+) `data` is always in the same place regardless of source
-- (+) Easy to add new metadata variants without changing the envelope shape
-- (−) `meta` must be discriminated on `source` for type narrowing
-- (−) Local operations add a trivially-simple envelope
-
-**Rationale**: Having `data` in a predictable location makes the 90% case (just get the result) simple. `meta` is for the 10% case (inspect transport details). A discriminated union on `source` gives typed access to each variant's fields.
-
----
-
-### ADR-007: MCP Output Handling — `structuredContent` First
-
-**Context**: MCP `CallToolResult` has two result fields:
-- `content: ContentBlock[]` — unstructured array of text/image/audio/resource blocks
-- `structuredContent?: Record<string, unknown>` — structured output matching the tool's `outputSchema` (MCP spec version 2025-03-26+)
-
-When `structuredContent` is present, it is the typed, schema-conforming output. When absent, only `content` is available and must be interpreted heuristically.
-
-**Decision**: The MCP adapter will:
-
-1. If `structuredContent` is present → use it as `data` in the envelope, `Type.Unknown()` remains the `outputSchema` (since we can't reliably map MCP's JSON Schema output to TypeBox at tool-discovery time)
-2. If `structuredContent` is absent → use `content` as `data` (the `MCPContentBlock[]` array)
-3. Always include the full `CallToolResult` metadata in `meta` (`isError`, `_meta`, full `content` array)
-4. If `isError: true` → the tool ran but returned an error result. The handler wraps the result in an envelope with `meta.isError: true` and **does not throw**. This preserves the error content for the consumer. This differs from protocol-level errors (tool not found, transport failure) which still throw `CallError`.
-
-The `outputSchema` on MCP-generated operations remains `Type.Unknown()` because MCP does not provide output schemas at tool-listing time, and even with `structuredContent` the schema validation would need to happen at call time.
-
-**Trade-offs**:
-- (+) Consumers get preferential access to structured output when available
-- (+) The raw content blocks are still in `meta` for rendering or fallback
-- (+) Matches MCP spec intent: `structuredContent` is the programmatically-usable output
-- (+) Error results are accessible to consumers — MCP `isError` doesn't always mean a call failure
-- (−) The shape of `data` changes based on whether `structuredContent` is present
-- (−) `outputSchema` can't reflect this dynamically
-- (−) Consumers must check `meta.isError` for MCP operations, whereas they check thrown exceptions for other sources
-
-**Rationale**: MCP is moving toward `structuredContent` as the primary output channel. Prioritizing it positions us correctly. The fallback to `content` handles older servers. Since `outputSchema` is already `Type.Unknown()` for MCP ops, the variability is acceptable. Not throwing on `isError: true` preserves the MCP semantic where error results are still useful content, not call failures.
-
----
-
-### ADR-008: HTTP Response Envelope — Preserve Transport Metadata
-
-**Context**: The OpenAPI adapter currently returns raw deserialized response bodies with no metadata about the HTTP transaction itself. Consumers that need HTTP status codes, headers, or content-type information have no way to access them.
-
-**Decision**: The OpenAPI adapter handler will return a `ResponseEnvelope` with `HTTPResponseMeta`:
-
-```ts
-interface HTTPResponseMeta {
-  source: "http"
-  statusCode: number
-  headers: Record<string, string>
-  contentType: string
-}
-```
-
-- `data` contains the parsed response body (JSON object, string, or ArrayBuffer — unchanged from current behavior)
-- `statusCode` preserves the HTTP status code
-- `headers` captures response headers for downstream use (pagination links, rate limits, etc.)
-- `contentType` records the original content type
-
-**Known limitation**: `headers` is `Record<string, string>` which does not preserve multi-value headers or `Set-Cookie`. For APIs that use these, headers with the same key are joined with `, ` (following the `fetch` `Headers` specification). This is a deliberate simplification; if multi-value headers become critical, the type can be extended to `Record<string, string | string[]>`.
-
-**Trade-offs**:
-- (+) Consumers can make decisions based on HTTP metadata (pagination, caching, error differentiation)
-- (+) No information is lost from the HTTP response (within the single-value header limitation)
-- (−) Breaking change from the current raw return value
-- (−) Headers map is a snapshot; streaming headers are not supported
-- (−) Multi-value headers (especially `Set-Cookie`) are collapsed
-
-**Rationale**: HTTP responses carry essential metadata. Losing it in an adapter that's supposed to expose the full capability of the underlying protocol is a design flaw. The envelope preserves this with minimal overhead. The multi-value header limitation can be addressed in a future iteration if needed.
-
----
-
-### ADR-009: Local Operations Get Minimal Envelopes
-
-**Context**: Local operations (registered directly in-process) return plain values from their handlers. Forcing them to wrap in `ResponseEnvelope` would be ergonomically poor.
-
-**Decision**: Local operation handlers return raw values. `OperationRegistry.execute()` and `CallHandler` automatically wrap raw values in a minimal `ResponseEnvelope` with `LocalResponseMeta`:
-
-```ts
-interface LocalResponseMeta {
-  source: "local"
-  operationId: string
-  timestamp: number  // Unix epoch milliseconds (Date.now())
-}
-```
-
-This means consumers of `execute()` and call protocol responses always receive `ResponseEnvelope`, regardless of whether the operation came from MCP, HTTP, or local code.
-
-For handlers that return `void` or `undefined`, the envelope wraps `data: undefined`. The envelope is still produced — `data` is `undefined` and `meta` contains the operation metadata.
-
-**Trade-offs**:
-- (+) Uniform result type for all consumers — no adapter-specific code needed
-- (+) Handlers stay simple — return raw values
-- (+) Call protocol events naturally carry envelope data
-- (−) Local envelope wrapping adds a thin layer that may seem unnecessary for in-process calls
-- (−) Call protocol events currently have `output: unknown`; changing this to `output: ResponseEnvelope` is a breaking change
-
-**Rationale**: The uniform interface is worth the thin wrapping layer. Most code just calls `envelope.data` and moves on. Code that cares about transport metadata inspects `envelope.meta`.
-
----
-
-### ADR-010: `unwrap()` Utility for Simple Consumption
-
-**Context**: Most consumers don't care about transport metadata. They just want the output value.
-
-**Decision**: Provide an `unwrap()` utility:
-
-```ts
-function unwrap<T>(envelope: ResponseEnvelope<T>): T {
-  return envelope.data
-}
-```
-
-This is literally `envelope.data`. It exists as a named function for documentation purposes and to make intent explicit at call sites.
-
-**Trade-offs**:
-- (+) Clear intent at call sites: `unwrap(result)` is self-documenting
-- (+) Easy to search for — all envelope-unwrapping sites are explicit
-- (+) Provides a place to add validation or transformation logic later if needed
-- (−) It's just property access; some may find it unnecessary
-
-**Rationale**: The cost is near-zero and the clarity benefit is real. It future-proofs the API for when envelope handling might need to evolve.
-
----
-
-### ADR-011: Call Protocol Breaking Change and Handler Responsibility Shift
-
-**Context**: The `call.responded` event currently has `{ requestId, output: unknown }`. With envelopes, `output` should carry a `ResponseEnvelope`. This is a breaking change for all call protocol consumers. Additionally, the current architecture has handlers publishing `call.responded` themselves, which creates an ambiguity about who is responsible for wrapping.
-
-**Decision — Breaking change**: `call.responded.output` changes from `unknown` to `ResponseEnvelope`. This is a single-release breaking change — there is no transitional API. The call protocol is in draft status, the package is pre-1.0, and the consumers (alkhub, opencode) are under our control.
-
-**Decision — Handler responsibility shift**: `CallHandler` becomes the sole publisher of `call.responded`. Handlers always return their result value (either raw or a `ResponseEnvelope`). `CallHandler`:
-1. Validates input and checks access control (existing behavior)
-2. Calls `handler(input, context)`
-3. Wraps the return value in a `ResponseEnvelope` if it isn't one already
-4. Publishes `call.responded` via `callMap.respond(requestId, envelope)`
-5. On error, publishes `call.error` (existing behavior)
-
-This eliminates the current pattern where handlers must publish `call.responded` themselves. Handlers that currently call `callMap.respond()` directly must be updated to return values instead.
-
-**Migration impact**:
-- `execute()` return type: `Promise<TOutput>` → `Promise<ResponseEnvelope<TOutput>>`
-- `callMap.call()` resolve value: `unknown` → `ResponseEnvelope`
-- `call.responded.output`: `unknown` → `ResponseEnvelope`
-- Handler contract: handlers return values, they do NOT publish events
-- Consumers that do `const result = await registry.execute(...)` must change to `const envelope = await registry.execute(...)` and access `envelope.data` or use `unwrap()`
-
-**Trade-offs**:
-- (+) Clear single responsibility: `CallHandler` wraps and publishes, handlers compute
-- (+) Every `call.responded` event is guaranteed to carry a `ResponseEnvelope`
-- (+) No ambiguity about who handles envelope construction
-- (−) Breaking change for all call protocol consumers — no transitional period
-- (−) Handlers that currently publish `call.responded` must be refactored to return values
-- (−) `execute()` callers must adapt to envelope return type
-
-**Rationale**: Having a single, clear ownership model for event publishing and envelope wrapping eliminates the ambiguity entirely. The breaking change is contained and the consumers are known and coordinated. A transitional API would add complexity for no long-term benefit.
-
----
-
-### ADR-012: Envelope Detection via Discriminant
-
-**Context**: When `execute()` or `CallHandler` receives a handler return value, it needs to determine whether it's already a `ResponseEnvelope` or a raw value that needs wrapping.
-
-Initially, duck-typing (`data` + `meta` + `meta.source` is a string) was considered, but this has a false-positive risk on user data that happens to have those properties. A `Symbol` brand was then considered, but `Symbol.for()` has cross-realm issues (iframes, workers) and `Symbol()` requires exporting for adapters, creating a coupling point.
-
-**Decision**: Use a plain string discriminant. A `ResponseEnvelope` is detected by checking for `meta.source` being one of the known source strings (`"local"`, `"http"`, `"mcp"`). This is a closed set that we control.
-
-```ts
-const RESPONSE_SOURCES = ["local", "http", "mcp"] as const
-type ResponseSource = typeof RESPONSE_SOURCES[number]
-
-function isResponseEnvelope(value: unknown): value is ResponseEnvelope {
-  if (typeof value !== "object" || value === null) return false
-  const obj = value as Record<string, unknown>
-  if (!("data" in obj) || !("meta" in obj)) return false
-  if (typeof obj.meta !== "object" || obj.meta === null) return false
-  return RESPONSE_SOURCES.includes((obj.meta as ResponseMeta).source as ResponseSource)
-}
-```
-
-**Why not `Symbol`**: `Symbol.for()` is realm-specific and fails across iframe/Worker boundaries. `Symbol()` requires the symbol to be exported and imported by every consumer and adapter, creating tight coupling. The string discriminant approach works everywhere and the false-positive risk is negligible because `meta.source` must be one of our three known strings.
-
-**Why not duck-typing alone**: A user could return `{ data: "hello", meta: { source: "local" } }` as an operation output that happens to match the envelope shape. However, since the known sources (`"local"`, `"http"`, `"mcp"`) are under our control and unlikely to appear naturally in operation outputs, the risk is acceptable. If it becomes a problem, we can add a versioned brand string like `__envelopeVersion: 1`.
-
-**Trade-offs**:
-- (+) Works across all JS realms (no Symbol cross-realm issues)
-- (+) No import coupling — adapters don't need to import a symbol
-- (+) JSON-serializable — envelope survives transport boundaries (pubsub over Redis/WebSocket)
-- (+) `isResponseEnvelope()` type guard provides TypeScript narrowing
-- (−) Theoretical false-positive if a user returns an object with `meta.source: "local"` by coincidence
-- (−) New sources must be registered in `RESPONSE_SOURCES`
-
-**Rationale**: The string discriminant approach is the simplest, most portable, and most debuggable option. It works with JSON serialization (important for cross-transport), requires no cross-realm Symbol handling, and the closed `RESPONSE_SOURCES` set prevents accidental collision. The `isResponseEnvelope()` guard provides a single point of detection logic.
-
----
-
-### ADR-013: `outputSchema` Validates Inner Data, Not Envelope
-
-**Context**: After envelope wrapping, `execute()` returns `ResponseEnvelope<TOutput>`. But `outputSchema` on `OperationSpec` describes the inner `data` shape (e.g., `Type.Object({ result: Type.String() })`), not the full envelope. If output validation is changed to validate against the envelope, it would always fail.
-
-**Decision**: `outputSchema` validates the inner `data` of the envelope, not the full `ResponseEnvelope`. The current `registry.execute()` validation flow changes to:
-
-1. Run handler
-2. Wrap result in envelope (if not already one)
-3. Validate `envelope.data` against `spec.outputSchema` (warning-only, not thrown)
-4. Return envelope
-
-This means `outputSchema` continues to describe the business data shape, not the transport envelope. The envelope is always present in the return value but is not part of the schema contract.
-
-**Trade-offs**:
-- (+) `outputSchema` stays focused on business data — no envelope schema bloat
-- (+) Existing `outputSchema` definitions don't need changes
-- (+) Clear separation: schema describes data, envelope describes transport
-- (−) Callers must understand that `outputSchema` validates `data`, not the full envelope
-- (−) The envelope shape itself is not validated by `outputSchema` (but it has its own `ResponseEnvelopeSchema`)
-
----
-
-### ADR-014: No Client Abstraction (Yet)
-
-**Context**: A "client" that handles envelopes, retries, and transport details was considered. This would be a higher-level abstraction that sits above the registry and call protocol.
-
-**Decision**: Do not introduce a `Client` class at this time. The current architecture has three distinct layers that serve different purposes:
-- `OperationRegistry` — spec/handler storage, `execute()` for direct calls
-- `PendingRequestMap` / `CallHandler` — event-based call protocol
-- `ResponseEnvelope` — result wrapping with metadata
-
-A "client" would conflate these layers. Instead, the envelope concept is introduced as a result type that flows through existing mechanisms.
-
-The `buildEnv()` function is the closest thing to a "client" — it provides namespace-keyed operation access. It should be updated to propagate envelopes.
-
-**Trade-offs**:
-- (+) Avoids over-engineering; the envelope type is sufficient for the current need
-- (+) Each layer stays focused on its concern
-- (−) There's no single "call this operation and give me the result" API that handles envelope unwrapping
-- (−) Consumers must understand the envelope concept to get at data
-
-**Rationale**: The registry + execute + envelope is sufficient. A client abstraction can be introduced later if a clear pattern emerges from usage.
+See ADR-005 for the full problem statement, composability analysis, and rationale.
 
 ## Types
 
@@ -317,30 +31,43 @@ interface ResponseEnvelope<T = unknown> {
 }
 ```
 
-The universal result wrapper. `data` holds the operation output. `meta` carries transport-specific metadata.
-
-Note: There is no Symbol brand on `ResponseEnvelope`. Detection is via `isResponseEnvelope()` which checks `meta.source` against the known sources. See ADR-012.
+Universal result wrapper. `data` holds the operation output. `meta` carries transport-specific metadata, discriminated on `meta.source`.
 
 ### `ResponseMeta` (discriminated union)
 
 ```ts
 type ResponseMeta = LocalResponseMeta | HTTPResponseMeta | MCPResponseMeta
-
 type ResponseSource = "local" | "http" | "mcp"
+```
 
+### `LocalResponseMeta`
+
+```ts
 interface LocalResponseMeta {
   source: "local"
   operationId: string
   timestamp: number  // Unix epoch milliseconds (Date.now())
 }
+```
 
+Minimal metadata for in-process operations. `operationId` is the full `namespace.name` key. `timestamp` is set at wrap time.
+
+### `HTTPResponseMeta`
+
+```ts
 interface HTTPResponseMeta {
   source: "http"
   statusCode: number
-  headers: Record<string, string>  // Single-value only; multi-value headers joined with ", "
+  headers: Record<string, string>
   contentType: string
 }
+```
 
+Preserves HTTP response metadata. Multi-value headers are joined with `, ` per the `fetch` `Headers` specification. This does not preserve `Set-Cookie` as a separate header — known limitation, can be extended to `Record<string, string | string[]>` if needed.
+
+### `MCPResponseMeta`
+
+```ts
 interface MCPResponseMeta {
   source: "mcp"
   isError: boolean
@@ -349,6 +76,13 @@ interface MCPResponseMeta {
   _meta?: Record<string, unknown>
 }
 ```
+
+Mirrors the MCP `CallToolResult` structure. Key semantics:
+
+- `isError: true` means the tool ran but returned an error **result** — this is NOT a `CallError` exception. The handler wraps the result in an envelope. Consumers check `envelope.meta.isError` to distinguish error results from success results.
+- `structuredContent` is the MCP structured output (spec version 2025-03-26+). When present, it is placed in `envelope.data` as the primary output.
+- `content` always holds the full content block array, available in `meta` for rendering or fallback.
+- `_meta` carries MCP protocol extensions.
 
 ### `MCPContentBlock`
 
@@ -374,45 +108,9 @@ interface MCPAnnotations {
 }
 ```
 
-These types mirror the MCP `CallToolResult` and `ContentBlock` structure, but are defined independently to avoid coupling to the MCP SDK as a runtime dependency. The MCP adapter maps from SDK types to these types.
+These types are our own definitions, decoupled from `@modelcontextprotocol/sdk`. The MCP adapter maps from SDK types to these types. This avoids coupling the main barrel to the MCP SDK runtime dependency.
 
-### Schema Constants
-
-```ts
-const LocalResponseMetaSchema = Type.Object({
-  source: Type.Literal("local"),
-  operationId: Type.String(),
-  timestamp: Type.Number({ description: "Unix epoch milliseconds" }),
-})
-
-const HTTPResponseMetaSchema = Type.Object({
-  source: Type.Literal("http"),
-  statusCode: Type.Number(),
-  headers: Type.Record(Type.String(), Type.String()),
-  contentType: Type.String(),
-})
-
-const MCPResponseMetaSchema = Type.Object({
-  source: Type.Literal("mcp"),
-  isError: Type.Boolean(),
-  content: Type.Array(MCPContentBlockSchema),
-  structuredContent: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  _meta: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-})
-
-const ResponseMetaSchema = Type.Union([
-  LocalResponseMetaSchema,
-  HTTPResponseMetaSchema,
-  MCPResponseMetaSchema,
-])
-
-const ResponseEnvelopeSchema = Type.Object({
-  data: Type.Unknown({ description: "Operation output" }),
-  meta: ResponseMetaSchema,
-})
-```
-
-TypeBox schemas for use in validation, spec definitions, and call protocol events.
+## Detection
 
 ### `isResponseEnvelope()`
 
@@ -424,25 +122,21 @@ function isResponseEnvelope(value: unknown): value is ResponseEnvelope {
   const obj = value as Record<string, unknown>
   if (!("data" in obj) || !("meta" in obj)) return false
   if (typeof obj.meta !== "object" || obj.meta === null) return false
-  return RESPONSE_SOURCES.includes(
-    (obj.meta as ResponseMeta).source as ResponseSource
-  )
+  return RESPONSE_SOURCES.includes((obj.meta as ResponseMeta).source as ResponseSource)
 }
 ```
 
-Type guard for envelope detection. Used by `execute()` and `CallHandler` to determine whether a handler return value is already an envelope or needs wrapping.
+Used by `execute()` and `CallHandler` to detect whether a handler return value is already an envelope. Detection by `meta.source` discriminant is:
 
-### `unwrap()`
+- JSON-serializable (works across pubsub transport boundaries)
+- Cross-realm safe (no `Symbol.for()` iframe/Worker issues)
+- Low false-positive risk (the known source strings are under our control)
 
-```ts
-function unwrap<T>(envelope: ResponseEnvelope<T>): T {
-  return envelope.data
-}
-```
+If false positives become a concern, a versioned brand like `__envelopeVersion: 1` can be added to the envelope shape. New sources must be registered in `RESPONSE_SOURCES`.
 
-### Factory Functions
+## Factory Functions
 
-Adapters should not construct envelope objects directly. Instead, they should use factory functions that ensure the correct `source` discriminant and consistent construction:
+Adapters and infrastructure use factory functions to construct envelopes. Adapters do not construct envelope objects directly.
 
 ```ts
 function localEnvelope<T>(data: T, operationId: string): ResponseEnvelope<T> {
@@ -458,149 +152,187 @@ function mcpEnvelope<T>(data: T, meta: Omit<MCPResponseMeta, "source">): Respons
 }
 ```
 
-These factories ensure the `source` string matches exactly, are used by `isResponseEnvelope()` detection, and provide a single point of construction for future evolution. Note: `localEnvelope(undefined, opId)` is valid — `T` resolves to `undefined` for void handlers, and the envelope wraps `data: undefined`.
+- `localEnvelope` is used by `execute()` and `CallHandler` when wrapping raw handler return values
+- `httpEnvelope` is used by the OpenAPI adapter handler
+- `mcpEnvelope` is used by the MCP adapter handler
+- `T` resolves to `undefined` for void handlers — `localEnvelope(undefined, opId)` is valid
 
-## Integration Points
+## Utility
 
-### API Impact Summary
-
-| API | Before | After |
-|-----|--------|-------|
-| `registry.execute()` return | `Promise<TOutput>` | `Promise<ResponseEnvelope<TOutput>>` |
-| `callMap.call()` resolve value | `unknown` (raw) | `ResponseEnvelope` |
-| `call.responded.output` | `unknown` | `ResponseEnvelopeSchema` |
-| MCP handler return | `ContentBlock[]` (raw) | `ResponseEnvelope` (via `mcpEnvelope()`) |
-| HTTP handler return | `any` (JSON/text/ArrayBuffer) | `ResponseEnvelope` (via `httpEnvelope()`) |
-| Local handler return | raw value (unchanged) | raw value (infrastructure wraps via `localEnvelope()`) |
-| `outputSchema` validation target | raw return value | `envelope.data` |
-| `subscribe()` yield | raw value | `ResponseEnvelope` per yield |
-
-### `OperationRegistry.execute()`
-
-Currently returns `Promise<TOutput>`. After envelopes, returns `Promise<ResponseEnvelope<TOutput>>`:
+### `unwrap()`
 
 ```ts
-async execute<TInput = unknown, TOutput = unknown>(
-  operationId: string,
-  input: TInput,
-  context: OperationContext,
-): Promise<ResponseEnvelope<TOutput>>
-```
-
-Implementation:
-1. Look up spec and handler (existing behavior)
-2. Validate input with `validateOrThrow` (existing behavior)
-3. Run the handler
-4. If the return value `isResponseEnvelope()` → pass through as the result
-5. Otherwise → wrap in `localEnvelope(result, operationId)`
-6. Validate `envelope.data` against `spec.outputSchema` (warning-only, not thrown)
-7. Return envelope
-
-Note: `isResponseEnvelope()` detects envelopes by `meta.source` matching a known source string. It does not validate that the envelope's `source` matches the operation's origin. For example, an MCP handler that explicitly returns a `localEnvelope(...)` would pass through as-is. Handlers that explicitly construct envelopes take responsibility for their metadata.
-
-### `CallHandler`
-
-The `CallHandler` currently calls `handler(input, context)` and expects the handler to publish `call.responded` itself. After envelopes, `CallHandler` takes full ownership of publishing:
-
-1. Look up spec and handler (existing behavior)
-2. Check access control (existing behavior)
-3. Validate input (existing behavior)
-4. Call `handler(input, context)` and await the result
-5. If the result `isResponseEnvelope()` → use it directly
-6. Otherwise → wrap in `localEnvelope(result, operationId)`
-7. Validate `envelope.data` against `spec.outputSchema` — warning-only, logged but not thrown (consistent with `execute()`)
-8. Publish `call.responded` via `callMap.respond(requestId, envelope)`
-9. On handler exception → publish `call.error` (existing behavior). Note: an envelope with `meta.isError: true` (e.g., MCP error results) does **not** trigger `call.error`. Only thrown exceptions from the handler trigger `call.error`. An envelope with `meta.isError: true` is a successful return where the consumer checks `envelope.meta.isError`.
-
-This eliminates the current pattern where handlers must publish `call.responded` themselves. Handlers never call `callMap.respond()` — they return values.
-
-**`PendingRequestMap.respond()` enforcement**: Since `CallHandler` is the sole publisher, `respond(requestId, output)` must enforce that `output` is a valid `ResponseEnvelope`. If `respond()` is called with a non-envelope value, it throws an error. This prevents any code bypassing `CallHandler` from publishing raw values to the call protocol. A future iteration may make `respond()` internal (not exported on the public API surface) to further enforce this invariant.
-
-### `PendingRequestMap.call()`
-
-Currently resolves with `responded.output` (typed as `unknown`). After envelopes, resolves with the `ResponseEnvelope`:
-
-```ts
-// Before
-pending.resolve(responded.output)
-
-// After
-pending.resolve(responded.output as ResponseEnvelope)
-```
-
-### `buildEnv()`
-
-Currently returns `OperationEnv = Record<string, Record<string, (input: unknown) => Promise<unknown>>>`. After envelopes, each function returns `Promise<ResponseEnvelope>`. The type becomes:
-
-```ts
-type OperationEnv = Record<string, Record<string, (input: unknown) => Promise<ResponseEnvelope>>>
-```
-
-Nested operation calls always get envelopes, which is consistent with `execute()`.
-
-### `subscribe()`
-
-Currently yields raw handler output. After envelopes:
-
-```ts
-async function* subscribe(
-  registry: OperationRegistry,
-  operationId: string,
-  input: unknown,
-  context: OperationContext,
-): AsyncGenerator<ResponseEnvelope, void, unknown>
-```
-
-Wrapping flow:
-1. Get spec and handler from registry (existing behavior)
-2. Cast handler to `AsyncGenerator` and iterate
-3. For each yielded value: if `isResponseEnvelope(value)` → yield it directly; otherwise → wrap in `localEnvelope(value, operationId)` and yield
-4. `operationId` comes from the `subscribe()` parameter; `timestamp` is `Date.now()` per yield (fresh timestamp for each emitted event)
-5. On generator cleanup, call `generator.return()` in `finally` (existing behavior)
-
-Adapter subscription handlers (e.g., SSE in OpenAPI) that explicitly return `ResponseEnvelope` values pass through via `isResponseEnvelope()` detection. The same `ResponseEnvelope` type is used for consistency — there is no separate `SubscriptionEnvelope`.
-
-### MCP Adapter (`from_mcp.ts`)
-
-Current handler:
-```ts
-handler: async (input) => {
-  const result = await client.callTool({ name, arguments: input })
-  if (result.isError) throw new Error(`MCP tool error: ${JSON.stringify(result.content)}`)
-  return result.content  // returns ContentBlock[]
+function unwrap<T>(envelope: ResponseEnvelope<T>): T {
+  return envelope.data
 }
 ```
 
-After envelopes:
+Convenience for the common case where metadata is not needed. Equivalent to `envelope.data`. Named for clarity at call sites and as a search target for envelope-unwrapping patterns.
+
+## Schema Constants
+
+TypeBox schemas for use in validation, spec definitions, and call protocol events:
+
 ```ts
-handler: async (input) => {
+const ResponseEnvelopeSchema = Type.Object({
+  data: Type.Unknown({ description: "Operation output" }),
+  meta: ResponseMetaSchema,
+})
+
+const ResponseMetaSchema = Type.Union([
+  LocalResponseMetaSchema,
+  HTTPResponseMetaSchema,
+  MCPResponseMetaSchema,
+])
+```
+
+Individual meta schemas (`LocalResponseMetaSchema`, `HTTPResponseMetaSchema`, `MCPResponseMetaSchema`, `MCPContentBlockSchema`) are defined inline in the source. See `src/response-envelope.ts` for the exact definitions.
+
+## Integration Points
+
+### `OperationRegistry.execute()`
+
+Returns `Promise<ResponseEnvelope<TOutput>>` instead of `Promise<TOutput>`.
+
+Flow:
+1. Look up spec and handler (existing)
+2. Validate input with `validateOrThrow` (existing)
+3. Await handler result
+4. If result `isResponseEnvelope()` → pass through as-is
+5. Otherwise → wrap in `localEnvelope(result, operationId)`
+6. Validate `envelope.data` against `spec.outputSchema` — warning-only, logged but not thrown
+7. Return envelope
+
+**Note**: `isResponseEnvelope()` does not validate that the envelope's `source` matches the operation's origin. An MCP handler that explicitly returns a `localEnvelope(...)` passes through as-is. Handlers that explicitly construct envelopes take responsibility for their metadata.
+
+**Current source state** (`src/registry.ts` lines 80-105): `execute()` returns `Promise<TOutput>` directly. It does not wrap results in envelopes, does not call `isResponseEnvelope()`, and validates raw `result` against `outputSchema`. The `Value.Cast()` normalization step is not implemented. Changes needed:
+
+| What | Current source | Target |
+|------|---------------|--------|
+| Return type | `Promise<TOutput>` | `Promise<ResponseEnvelope<TOutput>>` |
+| Wrapping | None — returns raw `result` | `isResponseEnvelope(result) ? result : localEnvelope(result, operationId)` |
+| Validation | `collectErrors(spec.outputSchema, result)` — on raw value | `collectErrors(spec.outputSchema, envelope.data)` — on envelope data |
+| `Value.Cast()` | Not used | If `outputSchema !== Unknown`, `envelope.data = Value.Cast(spec.outputSchema, envelope.data)` |
+
+### `CallHandler`
+
+Takes full ownership of publishing `call.responded`. Handlers return values; they do NOT publish events.
+
+Flow:
+1. Look up spec and handler (existing)
+2. Check access control (existing)
+3. Validate input (existing)
+4. Call handler and await result
+5. If result `isResponseEnvelope()` → use directly
+6. Otherwise → wrap in `localEnvelope(result, operationId)`
+7. Validate `envelope.data` against `spec.outputSchema` — warning-only
+8. Publish `call.responded` via `callMap.respond(requestId, envelope)`
+9. On handler exception → publish `call.error` (existing). Note: an envelope with `meta.isError: true` does **not** trigger `call.error`. Only thrown exceptions do.
+
+**Current source state** (`src/call.ts` lines 182-233): `buildCallHandler` calls `handler(input, context)` (line 226) but does not use the return value. The handler is expected to publish `call.responded` itself. Changes needed:
+
+| What | Current source | Target |
+|------|---------------|--------|
+| Handler model | Handler publishes `call.responded` itself; return value ignored | Handler returns value; `CallHandler` wraps and publishes |
+| Return value | `await handler(input, context)` called but result discarded | Result captured, wrapped in envelope if needed, then published |
+| Envelope detection | Not applicable | `isResponseEnvelope(result)` check before wrapping |
+| `call.responded.output` | `Type.Unknown()` | `ResponseEnvelopeSchema` |
+| `PendingRequestMap.respond()` | Accepts any `unknown` value | Must enforce `isResponseEnvelope()` guard |
+
+### `PendingRequestMap.respond()`
+
+Enforces that `output` is a `ResponseEnvelope` via the `isResponseEnvelope()` type guard (not full schema validation). If called with a non-envelope value, throws. This prevents any code bypassing `CallHandler`'s envelope wrapping. A future iteration may make `respond()` internal (not exported on the public API surface) to further enforce this invariant.
+
+**Current source state** (`src/call.ts` lines 151-156): `respond()` publishes `call.responded` with `output: unknown`. No envelope validation.
+
+### `PendingRequestMap.call()`
+
+Resolves with the `ResponseEnvelope` from `call.responded.output` instead of raw `unknown`.
+
+**Current source state** (`src/call.ts` lines 120-149): `call()` returns `Promise<unknown>`. The type should become `Promise<ResponseEnvelope>`.
+
+### `subscribe()`
+
+Each yielded value is wrapped in `ResponseEnvelope`. `SubscriptionHandler` implementations still yield raw values — `subscribe()` wraps each yield, consistent with how local handlers return raw values and `execute()` wraps them. If a yielded value `isResponseEnvelope()`, it passes through. Otherwise, `localEnvelope(value, operationId)` with a fresh `timestamp` per yield.
+
+### `buildEnv()`
+
+Each function in the returned `OperationEnv` returns `Promise<ResponseEnvelope>` instead of `Promise<unknown>`.
+
+### MCP Adapter (`from_mcp.ts`)
+
+#### data shape and composability
+
+MCP tool results have two shapes depending on whether the tool declares `outputSchema`:
+
+- **With `outputSchema`** (MCP spec 2025-06-18+): `structuredContent` contains the typed output matching the tool's declared schema. The `from_mcp` adapter converts the tool's JSON Schema `outputSchema` to a TypeBox schema via `FromSchema` and sets it as the operation's `outputSchema`. At call time, `envelope.data` is `structuredContent`, which matches `outputSchema`. These operations are **fully composable** with local operations — the consumer gets typed data just like calling a local handler.
+
+- **Without `outputSchema`**: No typed output is available. The operation's `outputSchema` is `Type.Unknown()`. `envelope.data` is `MCPContentBlock[]` (the raw content blocks). These operations are **not composable** — the consumer must inspect content blocks heuristically. Some MCP servers return `JSON.stringify`'d text in content blocks rather than structured output, making programmatic consumption even harder.
+
+When `structuredContent` is present, it is the primary data path. When absent, `content` is the only data path. This means `envelope.data` has a different shape depending on the MCP server version and tool configuration. Consumers that need a consistent shape should check `meta.source === "mcp"` and `meta.structuredContent` to determine the access pattern.
+
+#### outputSchema extraction
+
+The `from_mcp` adapter SHOULD extract `outputSchema` from MCP tool definitions (when available) and convert it to a TypeBox schema:
+
+```ts
+// In createMCPClient, when building the operation spec:
+outputSchema: tool.outputSchema
+  ? FromSchema(tool.outputSchema)   // Convert JSON Schema to TypeBox
+  : Type.Unknown()                   // No schema available
+```
+
+This enables `outputSchema` validation on `envelope.data` for MCP operations that declare their output schema, making them composable with local operations.
+
+#### Envelope stripping with `Value.Cast()`
+
+When an MCP operation has `outputSchema` and returns `structuredContent`, the `structuredContent` data can be cast against the TypeBox schema to strip excess properties and normalize it:
+
+```ts
+import { Value } from "@alkdev/typebox/value"
+
+// In the MCP handler, after getting structuredContent:
+const data = result.structuredContent
+  ? Value.Cast(spec.outputSchema, result.structuredContent)
+  : mapMCPContentBlocks(result.content)
+```
+
+`Value.Cast()` upcasts the `structuredContent` value into the target type, retaining matching properties, filling defaults for missing ones, and stripping properties not in the schema. This ensures `envelope.data` reliably matches `outputSchema` — the same guarantee that local operations provide.
+
+For MCP operations without `outputSchema` (where `outputSchema` is `Type.Unknown()`), `Value.Cast()` against `Type.Unknown()` is a no-op (accepts any value), so the data shape remains unpredictable. The composability gap exists only for these operations.
+
+This same pattern applies to OpenAPI responses: the parsed JSON can be passed through `Value.Cast(spec.outputSchema, data)` to normalize it against the operation's `outputSchema`.
+
+#### Handler behavior change
+
+```ts
+handler: async (input, context) => {
   const result = await client.callTool({ name, arguments: input })
-  if (result.isError) {
-    // MCP isError: true means the tool ran but returned an error result.
-    // We still wrap it in an envelope — the consumer checks meta.isError.
-    // Transport-level errors (tool not found, connection failure) still throw CallError.
-  }
+  // MCP isError: true means the tool ran but returned an error result.
+  // Wrap in envelope — consumer checks meta.isError.
+  // Transport-level errors (tool not found, connection failure) still throw CallError.
   return mcpEnvelope(
     result.structuredContent ?? mapMCPContentBlocks(result.content),
     {
       isError: result.isError ?? false,
       content: mapMCPContentBlocks(result.content),
-      structuredContent: result.structuredContent,
+      structuredContent: result.structuredContent as Record<string, unknown> | undefined,
       _meta: result._meta as Record<string, unknown> | undefined,
     },
   )
 }
 ```
 
-**Key behavior change**: MCP `isError: true` no longer throws. The error content is accessible via `envelope.data` and `envelope.meta.content`. The consumer checks `envelope.meta.isError` to distinguish error results from success results. This preserves the MCP semantic where error content is still useful.
-
-**`mapMCPContentBlocks()`**: Maps SDK `ContentBlock[]` to our `MCPContentBlock[]`. Signature: `(sdkBlocks: SDKContentBlock[]) => MCPContentBlock[]`. This is a 1:1 field mapping from MCP SDK types to our own `MCPContentBlock` discriminated union, decoupling us from the MCP SDK at the interface level. Each SDK content block type (`text`, `image`, `audio`, `resource`, `resource_link`) maps to the corresponding variant in our `MCPContentBlock` type, preserving all fields including optional `annotations`.
+Key differences from current behavior:
+- `isError: true` no longer throws. Error content is accessible via `envelope.data` and `envelope.meta.content`. The consumer checks `envelope.meta.isError`.
+- `structuredContent` is preferred as `data` when available (MCP spec 2025-03-26+)
+- Raw `content` blocks are always available in `meta.content`
+- `mapMCPContentBlocks()` maps SDK `ContentBlock[]` to our `MCPContentBlock[]` (1:1 field mapping, decoupling us from the MCP SDK at the interface level). Signature: `(sdkBlocks: SDKContentBlock[]) => MCPContentBlock[]`. Unknown content block types (from newer MCP spec versions that our `MCPContentBlock` union doesn't yet cover) are mapped to `{ type: "text", text: JSON.stringify(block) }` as a fallback — preserving the data without crashing.
 
 ### OpenAPI Adapter (`from_openapi.ts`)
 
-Current handler returns raw `response.json()` / `.text()` / `.arrayBuffer()`.
+Handler behavior change:
 
-After envelopes:
 ```ts
 handler: async (input, context) => {
   // ... existing URL construction and fetch logic ...
@@ -628,11 +360,38 @@ handler: async (input, context) => {
 }
 ```
 
-### Call Protocol Event Shape
+- On HTTP error status → throw `CallError` (not an envelope — these are transport errors)
+- Success responses → wrapped in `httpEnvelope` with full HTTP metadata
+- Headers are a `Record<string, string>` snapshot (multi-value headers joined with `, ` per fetch spec)
 
-`call.responded` changes from `{ requestId, output: unknown }` to `{ requestId, output: ResponseEnvelope }`.
+### Value.Cast() for Data Normalization
 
-`CallRespondedEventSchema`:
+When an adapter has a meaningful `outputSchema` (not `Type.Unknown()`), `Value.Cast()` from `@alkdev/typebox/value` can normalize `envelope.data` against the schema:
+
+```ts
+import { Value } from "@alkdev/typebox/value"
+
+// In execute(), after wrapping the result:
+if (!isResponseEnvelope(result)) {
+  envelope = localEnvelope(result, operationId)
+} else {
+  envelope = result
+}
+
+// Normalize data against outputSchema (when schema is meaningful)
+if (spec.outputSchema[Kind] !== "Unknown") {
+  envelope.data = Value.Cast(spec.outputSchema, envelope.data)
+}
+```
+
+This strips excess properties, fills defaults for missing ones, and upcasts values to match the declared type. For local operations, this provides the same guarantee as `Value.Check()` validation but with normalization instead of just warning. For MCP operations with `outputSchema`, it strips envelope-like properties that MCP servers might add beyond the declared schema. For OpenAPI operations, it normalizes the response body against the spec.
+
+Operations with `Type.Unknown()` `outputSchema` (typically MCP tools without `outputSchema`) are excluded — `Value.Cast()` against `Type.Unknown()` is a no-op.
+
+### `CallEventSchema`
+
+`call.responded.output` changes from `Type.Unknown()` to `ResponseEnvelopeSchema`:
+
 ```ts
 "call.responded": Type.Object({
   requestId: Type.String(),
@@ -640,41 +399,67 @@ handler: async (input, context) => {
 })
 ```
 
+## `outputSchema` and Validation
+
+`outputSchema` on `OperationSpec` validates `envelope.data`, not the full `ResponseEnvelope`. The envelope has its own `ResponseEnvelopeSchema` for call protocol validation. This keeps `outputSchema` focused on business data shape — no envelope schema bloat, and existing `outputSchema` definitions don't need changes.
+
+There are two validation/normalization steps for `envelope.data`:
+
+1. **Warning validation** (`collectErrors` + `formatValueErrors`): Checks `envelope.data` against `spec.outputSchema` and logs warnings on mismatch. This is the existing behavior in `execute()`.
+2. **Data normalization** (`Value.Cast`): When `outputSchema` is meaningful (not `Type.Unknown()`), `Value.Cast(spec.outputSchema, envelope.data)` normalizes the data — strips excess properties, fills defaults for missing ones, upcasts values to match the declared type. This is particularly important for MCP `structuredContent` (which may contain extra properties from the MCP envelope) and OpenAPI response bodies (which may have extra fields not in the spec).
+
+The `Value.Cast()` step is optional: if `outputSchema` is `Type.Unknown()`, normalization is skipped (any value is accepted). This preserves the current behavior for MCP tools without `outputSchema`.
+
 ## Constraints
 
-1. **No runtime envelope overhead for local handlers** — local handlers return raw values; wrapping happens in infrastructure, not in user code
-2. **Envelope is always present at the call protocol boundary** — `call.responded` always carries `ResponseEnvelope`, never raw values. `PendingRequestMap.respond()` enforces this at runtime.
-3. **Adapters use factory functions** — `localEnvelope()`, `httpEnvelope()`, `mcpEnvelope()` ensure correct `source` discriminant and consistent construction. Adapters do not construct envelope objects directly.
-4. **MCPContentBlock types are our own, not MCP SDK types** — avoids runtime dependency on `@modelcontextprotocol/sdk` in the main barrel
-5. **Breaking change: single-release, no transitional API** — `execute()` return type and `call.responded.output` shape change in one release. Call protocol is draft status, package is pre-1.0, consumers are coordinated.
-6. **`unwrap()` is the recommended simple-path API** — for consumers that don't need metadata
-7. **`outputSchema` validates `envelope.data`, not the full envelope** — `ResponseEnvelopeSchema` validates the envelope structure at the call protocol level; `outputSchema` validates the business data
+1. **No runtime envelope overhead for local handlers** — local handlers return raw values; wrapping happens in infrastructure (`execute()`, `CallHandler`), not in user code
+2. **Envelope always present at call protocol boundary** — `call.responded` always carries `ResponseEnvelope`, never raw values. `PendingRequestMap.respond()` enforces this.
+3. **Adapters use factory functions** — `localEnvelope()`, `httpEnvelope()`, `mcpEnvelope()`. Adapters do not construct envelope objects directly.
+4. **MCPContentBlock types are our own** — not MCP SDK types. Avoids runtime dependency on `@modelcontextprotocol/sdk` in the main barrel.
+5. **Breaking change: single-release, no transitional API** — `execute()` return type and `call.responded` shape change in one release. Package is pre-1.0, call protocol is draft, consumers are coordinated.
+6. **`unwrap()` is the simple-path API** — for consumers that don't need metadata
+7. **`outputSchema` validates `envelope.data`** — `ResponseEnvelopeSchema` validates the envelope structure; `outputSchema` validates business data
 8. **`isResponseEnvelope()` is the sole detection mechanism** — no Symbol brands, no duck-typing beyond the closed `source` discriminant set
 
-## Related Spec Updates
+## Open Questions
 
-When this spec stabilizes, the following documents must be updated to reflect envelope changes:
+1. **Client abstraction** — Envelopes provide metadata and `unwrap()` provides simple access, but real usage may reveal patterns that justify a higher-level abstraction: e.g., a client that auto-handles MCP `isError` results (throwing on error content vs. returning it), or one that extracts pagination cursors from HTTP headers. Deferred until usage patterns from alkhub and opencode confirm whether `unwrap()` + `meta.source` dispatch is sufficient or whether a typed "client" per source adds real value.
+
+2. **Subscription envelopes** — `subscribe()` wraps each yield in `ResponseEnvelope`. For long-running subscriptions, `localResponseMeta.timestamp` updates per yield. Whether subscriptions need additional metadata (e.g., sequence numbers, cursor positions) is an open question for future iteration.
+
+3. **`respond()` visibility** — Currently public on `PendingRequestMap`. After CallHandler takes ownership of publishing, `respond()` may become internal-only to enforce the envelope invariant.
+
+4. **Envelope directionality (serving)** — The current design covers **consuming** remote operations (MCP, OpenAPI) and wrapping their results. The reverse direction — **serving** local operations via MCP or OpenAPI — is not yet addressed. When exposing operations as an MCP server, results must be wrapped in MCP's `CallToolResult` format (`structuredContent` + `content`). When exposing as OpenAPI, results must be serialized as HTTP response bodies. How envelopes interact with this serving direction is an open design question.
+
+5. **JSON.stringify in MCP content blocks** — Some MCP servers return `JSON.stringify`'d data in text content blocks instead of using `structuredContent`. The `from_mcp` adapter could attempt `JSON.parse()` on text content when `structuredContent` is absent, but this is fragile (not all text content is JSON). If the operation has a meaningful `outputSchema`, `Value.Cast()` could normalize the parsed result against the schema, making the consumer's experience consistent regardless of whether the MCP server uses `structuredContent` or stringified JSON. Whether this JSON.parse heuristic belongs in the adapter or in consumer code is unresolved.
+
+6. **MCP `outputSchema` extraction completeness** — The MCP spec (2025-06-18+) allows tools to declare `outputSchema`, but many existing servers don't. The adapter's `FromSchema` conversion of MCP `outputSchema` to TypeBox may encounter JSON Schema features that `FromSchema` doesn't handle. The fallback is `Type.Unknown()`, same as the no-schema case.
+
+## Migration Checklist
+
+When this spec stabilizes, the following documents and code must be updated:
 
 | Document | Section | Change |
-|----------|----------|--------|
+|----------|---------|--------|
 | `call-protocol.md` | CallHandler | Handler no longer publishes `call.responded`; returns values. CallHandler wraps and publishes. |
-| `call-protocol.md` | PendingRequestMap | `respond()` validates envelope; resolves with `ResponseEnvelope` instead of `unknown` |
+| `call-protocol.md` | PendingRequestMap | `respond()` validates envelope via `isResponseEnvelope()`; resolves with `ResponseEnvelope` instead of `unknown` |
 | `call-protocol.md` | CallEventMap | `call.responded.output` changes from `Type.Unknown()` to `ResponseEnvelopeSchema` |
-| `api-surface.md` | execute() | Return type: `Promise<TOutput>` → `Promise<ResponseEnvelope<TOutput>>` |
-| `api-surface.md` | PendingRequestMap | `call()` resolve type: `unknown` → `ResponseEnvelope` |
-| `api-surface.md` | subscribe() | Yield type: `unknown` → `ResponseEnvelope` |
-| `api-surface.md` | OperationEnv | Inner function return type: `Promise<unknown>` → `Promise<ResponseEnvelope>` |
-| `api-surface.md` | CallHandler | New: wraps handler result, publishes `call.responded`. No longer "handler publishes" model. |
-| `adapters.md` | from_mcp | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. |
-| `adapters.md` | from_openapi | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. |
+| `api-surface.md` | `execute()` | Return type: `Promise<TOutput>` → `Promise<ResponseEnvelope<TOutput>>` |
+| `api-surface.md` | `PendingRequestMap.call()` | Resolve type: `unknown` → `ResponseEnvelope` |
+| `api-surface.md` | `subscribe()` | Yield type: `unknown` → `ResponseEnvelope` |
+| `api-surface.md` | `OperationEnv` | Inner function return type: `Promise<unknown>` → `Promise<ResponseEnvelope>` |
+| `api-surface.md` | `CallHandler` | New: wraps handler result, publishes `call.responded`. No longer "handler publishes" model. |
+| `call-protocol.md` | `PendingRequestMap.respond()` | Now enforces `isResponseEnvelope()` check — throws on raw values. Behavioral breaking change. |
+| `api-surface.md` | `PendingRequestMap.respond()` | Same — `respond()` now requires `ResponseEnvelope` argument. |
+| `adapters.md` | `from_mcp` | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. |
+| `adapters.md` | `from_mcp` | `outputSchema` extracted from MCP tool definitions when available (2025-06-18+ spec), converted via `FromSchema`. Falls back to `Type.Unknown()`. |
+| `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. |
 
 Additionally, any code subscribing to `"call.responded"` events via the pubsub system (not just `PendingRequestMap`, but any direct pubsub consumer) must expect `ResponseEnvelope` instead of `unknown` in the event payload.
 
 ## References
 
-- MCP `CallToolResult` — `spec.types.d.ts` in `@modelcontextprotocol/sdk`
-- MCP `ContentBlock` type — discriminated union of `text`, `image`, `audio`, `resource`, `resource_link`
-- OpenAPI response handling — `src/from_openapi.ts`, `createHTTPOperation` handler
-- Call protocol events — `src/call.ts`, `CallEventSchema`
-- [call-protocol.md](call-protocol.md) — Current event shapes and `PendingRequestMap` design
-- [adapters.md](adapters.md) — Current adapter handler implementations
+- [ADR-005](decisions/005-response-envelopes.md) — Design rationale for response envelopes
+- [call-protocol.md](call-protocol.md) — Call event shapes, PendingRequestMap, CallHandler
+- [api-surface.md](api-surface.md) — Public API surface
+- [adapters.md](adapters.md) — MCP and OpenAPI adapter internals
