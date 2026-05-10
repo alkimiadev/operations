@@ -5,8 +5,6 @@ last_updated: 2026-05-10
 
 # Response Envelopes
 
-> **Note**: This spec supersedes the current behavior described in [call-protocol.md](call-protocol.md) and [api-surface.md](api-surface.md). Those documents describe the pre-envelope model where `execute()` returns `TOutput` and handlers publish `call.responded` directly. The migration checklist below tracks the required updates. Until those documents are updated, this spec is the authoritative source for envelope behavior.
-
 Types, factory functions, integration points, and constraints for the `ResponseEnvelope` system. See [ADR-005](decisions/005-response-envelopes.md) for the design rationale.
 
 ## Problem
@@ -190,6 +188,26 @@ Individual meta schemas (`LocalResponseMetaSchema`, `HTTPResponseMetaSchema`, `M
 
 ## Integration Points
 
+### Shared Result Pipeline
+
+Both `OperationRegistry.execute()` and `CallHandler` follow the same result processing pipeline after obtaining a handler result. This ensures consistent behavior whether the operation is invoked directly or through the call protocol:
+
+1. **Detect envelope**: If result `isResponseEnvelope()` → pass through as-is (adapter handlers return pre-built envelopes)
+2. **Wrap**: Otherwise → wrap in `localEnvelope(result, operationId)`
+3. **Normalize**: If `spec.outputSchema` is not `Type.Unknown()`, apply `Value.Cast(spec.outputSchema, envelope.data)` — strips excess properties, fills defaults, upcasts values
+4. **Validate**: Check `envelope.data` against `spec.outputSchema` with `collectErrors()` — **warning-only**, logged but not thrown
+
+The order matters: normalization happens before validation, so warnings reflect the normalized data shape. `Value.Cast()` may silently fix data that would otherwise fail validation (e.g., filling defaults for optional fields), and the validation step catches any remaining mismatches.
+
+### Result Pipeline Differences
+
+| Aspect | `execute()` | `CallHandler` |
+|--------|-------------|---------------|
+| Access control | Not checked (trusted internal calls) | Checks `AccessControl` before dispatch |
+| Error handling | Throws `CallError` directly | Publishes `call.error` via pubsub |
+| Publishing | Returns envelope directly | Publishes `call.responded` via `callMap.respond()` |
+| Context | Direct call, no `requestId` | Has `requestId`, `parentRequestId`, `identity`, `deadline` |
+
 ### `OperationRegistry.execute()`
 
 Returns `Promise<ResponseEnvelope<TOutput>>` instead of `Promise<TOutput>`.
@@ -198,10 +216,8 @@ Flow:
 1. Look up spec and handler (existing)
 2. Validate input with `validateOrThrow` (existing)
 3. Await handler result
-4. If result `isResponseEnvelope()` → pass through as-is
-5. Otherwise → wrap in `localEnvelope(result, operationId)`
-6. Validate `envelope.data` against `spec.outputSchema` — warning-only, logged but not thrown
-7. Return envelope
+4. Apply shared result pipeline (detect → wrap → normalize → validate)
+5. Return envelope
 
 **Note**: `isResponseEnvelope()` does not validate that the envelope's `source` matches the operation's origin. An MCP handler that explicitly returns a `localEnvelope(...)` passes through as-is. Handlers that explicitly construct envelopes take responsibility for their metadata.
 
@@ -219,15 +235,16 @@ Flow:
 Takes full ownership of publishing `call.responded`. Handlers return values; they do NOT publish events.
 
 Flow:
-1. Look up spec and handler (existing)
-2. Check access control (existing)
-3. Validate input (existing)
-4. Call handler and await result
-5. If result `isResponseEnvelope()` → use directly
-6. Otherwise → wrap in `localEnvelope(result, operationId)`
-7. Validate `envelope.data` against `spec.outputSchema` — warning-only
-8. Publish `call.responded` via `callMap.respond(requestId, envelope)`
-9. On handler exception → publish `call.error` (existing). Note: an envelope with `meta.isError: true` does **not** trigger `call.error`. Only thrown exceptions do.
+1. Look up spec by `operationId` from the registry via `getSpec()`
+2. If not found, throw `CallError(OPERATION_NOT_FOUND, ...)`
+3. Look up handler by `operationId` via `getHandler()`
+4. If not found, throw `CallError(OPERATION_NOT_FOUND, "No handler registered for operation: ...")`
+5. Check access control (existing)
+6. Validate input with `validateOrThrow` (existing)
+7. Call handler and await result
+8. Apply shared result pipeline (detect → wrap → normalize → validate)
+9. Publish `call.responded` via `callMap.respond(requestId, envelope)`
+10. On handler exception → publish `call.error` (existing). Note: an envelope with `meta.isError: true` does **not** trigger `call.error`. Only thrown exceptions do.
 
 **Current source state** (`src/call.ts` lines 182-233): `buildCallHandler` calls `handler(input, context)` (line 226) but does not use the return value. The handler is expected to publish `call.responded` itself. Changes needed:
 
@@ -236,6 +253,7 @@ Flow:
 | Handler model | Handler publishes `call.responded` itself; return value ignored | Handler returns value; `CallHandler` wraps and publishes |
 | Return value | `await handler(input, context)` called but result discarded | Result captured, wrapped in envelope if needed, then published |
 | Envelope detection | Not applicable | `isResponseEnvelope(result)` check before wrapping |
+| Result pipeline | None | Detect → wrap → normalize → validate → publish |
 | `call.responded.output` | `Type.Unknown()` | `ResponseEnvelopeSchema` |
 | `PendingRequestMap.respond()` | Accepts any `unknown` value | Must enforce `isResponseEnvelope()` guard |
 
@@ -366,27 +384,13 @@ handler: async (input, context) => {
 
 ### Value.Cast() for Data Normalization
 
-When an adapter has a meaningful `outputSchema` (not `Type.Unknown()`), `Value.Cast()` from `@alkdev/typebox/value` can normalize `envelope.data` against the schema:
+The shared result pipeline (defined above) includes `Value.Cast()` normalization as step 3. This section provides additional context on how `Value.Cast()` works and why it matters for each source:
 
-```ts
-import { Value } from "@alkdev/typebox/value"
+- **Local operations**: `Value.Cast()` provides normalization against the declared `outputSchema`, stripping excess properties and filling defaults — a stronger guarantee than `Value.Check()` validation alone (which only warns).
+- **MCP operations with `outputSchema`**: `Value.Cast()` normalizes `structuredContent` against the TypeBox-converted schema, stripping any extra properties the MCP server may have added beyond the declared schema. This makes MCP data composable with local operations.
+- **OpenAPI operations**: `Value.Cast()` normalizes the parsed HTTP response body against the operation's `outputSchema`, ensuring consistent data shapes.
 
-// In execute(), after wrapping the result:
-if (!isResponseEnvelope(result)) {
-  envelope = localEnvelope(result, operationId)
-} else {
-  envelope = result
-}
-
-// Normalize data against outputSchema (when schema is meaningful)
-if (spec.outputSchema[Kind] !== "Unknown") {
-  envelope.data = Value.Cast(spec.outputSchema, envelope.data)
-}
-```
-
-This strips excess properties, fills defaults for missing ones, and upcasts values to match the declared type. For local operations, this provides the same guarantee as `Value.Check()` validation but with normalization instead of just warning. For MCP operations with `outputSchema`, it strips envelope-like properties that MCP servers might add beyond the declared schema. For OpenAPI operations, it normalizes the response body against the spec.
-
-Operations with `Type.Unknown()` `outputSchema` (typically MCP tools without `outputSchema`) are excluded — `Value.Cast()` against `Type.Unknown()` is a no-op.
+Operations with `Type.Unknown()` `outputSchema` (typically MCP tools without `outputSchema`) are excluded — `Value.Cast()` against `Type.Unknown()` is a no-op (accepts any value).
 
 ### `CallEventSchema`
 
@@ -403,12 +407,12 @@ Operations with `Type.Unknown()` `outputSchema` (typically MCP tools without `ou
 
 `outputSchema` on `OperationSpec` validates `envelope.data`, not the full `ResponseEnvelope`. The envelope has its own `ResponseEnvelopeSchema` for call protocol validation. This keeps `outputSchema` focused on business data shape — no envelope schema bloat, and existing `outputSchema` definitions don't need changes.
 
-There are two validation/normalization steps for `envelope.data`:
+The shared result pipeline (see [Shared Result Pipeline](#shared-result-pipeline)) applies two steps to `envelope.data` after wrapping:
 
-1. **Warning validation** (`collectErrors` + `formatValueErrors`): Checks `envelope.data` against `spec.outputSchema` and logs warnings on mismatch. This is the existing behavior in `execute()`.
-2. **Data normalization** (`Value.Cast`): When `outputSchema` is meaningful (not `Type.Unknown()`), `Value.Cast(spec.outputSchema, envelope.data)` normalizes the data — strips excess properties, fills defaults for missing ones, upcasts values to match the declared type. This is particularly important for MCP `structuredContent` (which may contain extra properties from the MCP envelope) and OpenAPI response bodies (which may have extra fields not in the spec).
+1. **Normalization** (`Value.Cast`): When `outputSchema` is meaningful (not `Type.Unknown()`), `Value.Cast(spec.outputSchema, envelope.data)` normalizes the data — strips excess properties, fills defaults for missing ones, upcasts values to match the declared type. Normalization happens before validation.
+2. **Warning validation** (`collectErrors` + `formatValueErrors`): Checks `envelope.data` against `spec.outputSchema` and logs warnings on mismatch. Validation happens after normalization, so it checks the normalized data shape.
 
-The `Value.Cast()` step is optional: if `outputSchema` is `Type.Unknown()`, normalization is skipped (any value is accepted). This preserves the current behavior for MCP tools without `outputSchema`.
+The normalization step is optional: if `outputSchema` is `Type.Unknown()`, normalization is skipped (any value is accepted). This preserves the current behavior for MCP tools without `outputSchema`.
 
 ## Constraints
 
@@ -437,23 +441,38 @@ The `Value.Cast()` step is optional: if `outputSchema` is `Type.Unknown()`, norm
 
 ## Migration Checklist
 
-When this spec stabilizes, the following documents and code must be updated:
+The following documentation changes have been completed:
 
-| Document | Section | Change |
-|----------|---------|--------|
-| `call-protocol.md` | CallHandler | Handler no longer publishes `call.responded`; returns values. CallHandler wraps and publishes. |
-| `call-protocol.md` | PendingRequestMap | `respond()` validates envelope via `isResponseEnvelope()`; resolves with `ResponseEnvelope` instead of `unknown` |
-| `call-protocol.md` | CallEventMap | `call.responded.output` changes from `Type.Unknown()` to `ResponseEnvelopeSchema` |
-| `api-surface.md` | `execute()` | Return type: `Promise<TOutput>` → `Promise<ResponseEnvelope<TOutput>>` |
-| `api-surface.md` | `PendingRequestMap.call()` | Resolve type: `unknown` → `ResponseEnvelope` |
-| `api-surface.md` | `subscribe()` | Yield type: `unknown` → `ResponseEnvelope` |
-| `api-surface.md` | `OperationEnv` | Inner function return type: `Promise<unknown>` → `Promise<ResponseEnvelope>` |
-| `api-surface.md` | `CallHandler` | New: wraps handler result, publishes `call.responded`. No longer "handler publishes" model. |
-| `call-protocol.md` | `PendingRequestMap.respond()` | Now enforces `isResponseEnvelope()` check — throws on raw values. Behavioral breaking change. |
-| `api-surface.md` | `PendingRequestMap.respond()` | Same — `respond()` now requires `ResponseEnvelope` argument. |
-| `adapters.md` | `from_mcp` | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. |
-| `adapters.md` | `from_mcp` | `outputSchema` extracted from MCP tool definitions when available (2025-06-18+ spec), converted via `FromSchema`. Falls back to `Type.Unknown()`. |
-| `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. |
+| Document | Section | Change | Status |
+|----------|---------|--------|--------|
+| `call-protocol.md` | CallHandler | Handler no longer publishes `call.responded`; returns values. CallHandler wraps and publishes. | ✅ |
+| `call-protocol.md` | PendingRequestMap | `respond()` validates envelope via `isResponseEnvelope()`; resolves with `ResponseEnvelope` instead of `unknown` | ✅ |
+| `call-protocol.md` | CallEventMap | `call.responded.output` changes from `Type.Unknown()` to `ResponseEnvelopeSchema` | ✅ |
+| `api-surface.md` | `execute()` | Return type: `Promise<TOutput>` → `Promise<ResponseEnvelope<TOutput>>` | ✅ |
+| `api-surface.md` | `PendingRequestMap.call()` | Resolve type: `unknown` → `ResponseEnvelope` | ✅ |
+| `api-surface.md` | `subscribe()` | Yield type: `unknown` → `ResponseEnvelope` | ✅ |
+| `api-surface.md` | `OperationEnv` | Inner function return type: `Promise<unknown>` → `Promise<ResponseEnvelope>` | ✅ |
+| `api-surface.md` | `CallHandler` | Wraps handler result, publishes `call.responded`. No longer "handler publishes" model. | ✅ |
+| `call-protocol.md` | `PendingRequestMap.respond()` | Now enforces `isResponseEnvelope()` check — throws on raw values. | ✅ |
+| `api-surface.md` | `PendingRequestMap.respond()` | `respond()` now requires `ResponseEnvelope` argument. | ✅ |
+| `adapters.md` | `from_mcp` | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. | ✅ (previous) |
+| `adapters.md` | `from_mcp` | `outputSchema` extracted when available, via `FromSchema`. Falls back to `Type.Unknown()`. | ✅ (previous) |
+| `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. | ✅ (previous) |
+
+The following **code** changes are still needed:
+
+| Code | Change |
+|------|--------|
+| `src/registry.ts` | `execute()` returns `Promise<ResponseEnvelope<TOutput>>` |
+| `src/call.ts` | `CallHandler` captures return value, wraps in envelope, publishes `call.responded` |
+| `src/call.ts` | `CallEventSchema` `output` field changes to `ResponseEnvelopeSchema` |
+| `src/call.ts` | `PendingRequestMap.respond()` adds `isResponseEnvelope()` guard |
+| `src/call.ts` | `PendingRequestMap.call()` resolves with `ResponseEnvelope` |
+| `src/subscribe.ts` | `subscribe()` wraps yields in `ResponseEnvelope` |
+| `src/env.ts` | `buildEnv()` functions return `Promise<ResponseEnvelope>` |
+| `src/response-envelope.ts` | New file: types, factory functions, detection, schemas |
+| `src/from_mcp.ts` | Handler returns `mcpEnvelope()`, extracts `outputSchema`, uses `structuredContent` |
+| `src/from_openapi.ts` | Handler returns `httpEnvelope()` |
 
 Additionally, any code subscribing to `"call.responded"` events via the pubsub system (not just `PendingRequestMap`, but any direct pubsub consumer) must expect `ResponseEnvelope` instead of `unknown` in the event payload.
 

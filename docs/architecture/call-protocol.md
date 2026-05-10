@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-10
 ---
 
 # Call Protocol
@@ -13,10 +13,10 @@ The call protocol is the unified transport layer for all operation invocations. 
 
 At the protocol level, `call` and `subscribe` are the same thing with different consumption patterns:
 
-- **`call`**: Publish `call.requested`, subscribe to `call.responded:{requestId}`, resolve on first response → `Promise<TOutput>`
-- **`subscribe`**: Publish `call.requested`, subscribe to `call.responded:{requestId}`, yield each response → `AsyncIterable<TOutput>`
+- **`call`**: Publish `call.requested`, subscribe to `call.responded:{requestId}`, resolve on first response → `Promise<ResponseEnvelope>`
+- **`subscribe`**: Publish `call.requested`, subscribe to `call.responded:{requestId}`, yield each response → `AsyncIterable<ResponseEnvelope>`
 
-Both use the same event types, the same `requestId` correlation, and the same `PendingRequestMap`. `call` is semantically `subscribe().next()`.
+Both use the same event types, the same `requestId` correlation, and the same `PendingRequestMap`. `call` is semantically `subscribe().next()`. All responses are wrapped in `ResponseEnvelope` — see [response-envelopes.md](response-envelopes.md) for the full envelope type system.
 
 ## Event Types
 
@@ -40,7 +40,7 @@ const CallEventMap = {
   }),
   "call.responded": Type.Object({
     requestId: Type.String(),
-    output: Type.Unknown(),
+    output: ResponseEnvelopeSchema,
   }),
   "call.aborted": Type.Object({
     requestId: Type.String(),
@@ -54,6 +54,8 @@ const CallEventMap = {
 }
 ```
 
+`call.responded.output` uses `ResponseEnvelopeSchema` (defined in [response-envelopes.md](response-envelopes.md)). This means every response through the call protocol carries `data` and `meta` with source-discriminated metadata. Handlers do not construct this envelope manually — `CallHandler` wraps handler return values automatically.
+
 ### Request Correlation
 
 Every call has a unique `requestId` (UUID). Nested calls include `parentRequestId` to track the call chain. Responses and errors match to requests by `requestId`.
@@ -66,9 +68,11 @@ Caller                              Handler
   │─── call.requested ───────────────>│
   │     {requestId, operationId,       │
   │      input, identity, deadline}   │
-  │                                    │
+  │                                    │  handler returns value
+  │                                    │  CallHandler wraps in ResponseEnvelope
   │<── call.responded ────────────────│
-  │     {requestId, output}           │
+  │     {requestId,                   │
+  │      output: ResponseEnvelope}    │
 ```
 
 On error:
@@ -112,7 +116,7 @@ async call(
   operationId: string,
   input: unknown,
   options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
-): Promise<unknown>
+): Promise<ResponseEnvelope>
 ```
 
 1. Generate `requestId` via `crypto.randomUUID()`
@@ -120,19 +124,23 @@ async call(
 3. If `deadline` is set, start a timeout timer that rejects with `TIMEOUT`
 4. Store `PendingRequest` in the internal map
 5. Publish `call.requested` event with all fields
-6. Return the Promise (resolves on `call.responded`, rejects on `call.error` or `call.aborted`)
+6. Return the Promise (resolves with `ResponseEnvelope` on `call.responded`, rejects on `call.error` or `call.aborted`)
+
+The resolved value is a `ResponseEnvelope` — consumers access typed data via `envelope.data` and source metadata via `envelope.meta`. Use `unwrap(envelope)` as a convenience for the common case where only `data` is needed.
 
 ### Internal Subscription Wiring
 
 On construction, three async loops subscribe to pubsub topics:
 
-- **`call.responded`**: Look up `PendingRequest` by `requestId`, clear timer if set, resolve with `output`
+- **`call.responded`**: Look up `PendingRequest` by `requestId`, clear timer if set, resolve with the `ResponseEnvelope` from `output` field. The envelope is already validated by `respond()`'s `isResponseEnvelope()` guard (or created by `CallHandler`'s wrapping logic), so no additional validation is needed at this point.
 - **`call.error`**: Look up `PendingRequest`, clear timer, reject with `CallError(code, message, details)`
 - **`call.aborted`**: Look up `PendingRequest`, clear timer, reject with `CallError(ABORTED, ...)`
 
 ### `respond(requestId, output)`
 
-Publishes `call.responded`. Used by handlers to send results back through the protocol.
+Publishes `call.responded`. The `output` parameter must be a `ResponseEnvelope` — `isResponseEnvelope()` is checked and a non-envelope value throws. This enforces the invariant that all call protocol responses carry source metadata.
+
+In practice, `respond()` is called by `CallHandler` after wrapping the handler's return value. Direct calls to `respond()` with raw values are rejected.
 
 ### `emitError(requestId, code, message, details?)`
 
@@ -144,7 +152,7 @@ Looks up the `PendingRequest`, clears its timer, publishes `call.aborted`, rejec
 
 ## CallHandler
 
-`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()`.
+`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()`. It takes full ownership of publishing `call.responded` — handlers return values; they do NOT publish events.
 
 ```ts
 function buildCallHandler(config: CallHandlerConfig): CallHandler
@@ -166,21 +174,26 @@ type CallHandler = (event: CallRequestedEvent) => Promise<void>
 5. Check access control (see below)
 6. Validate input with `validateOrThrow`
 7. Execute operation handler
-8. On success: the handler is expected to have published `call.responded` through whatever mechanism
-9. On failure: `mapError` converts the thrown value to `CallError`
+8. On success: apply the shared result pipeline (see [Response Envelopes → Shared Result Pipeline](response-envelopes.md#shared-result-pipeline)):
+   - Detect: `isResponseEnvelope(result)` → pass through, otherwise `localEnvelope(result, operationId)`
+   - Normalize: `Value.Cast(spec.outputSchema, envelope.data)` when `outputSchema` is not `Type.Unknown()`
+   - Validate: `collectErrors(spec.outputSchema, envelope.data)` — warning-only
+   - Publish `call.responded` via `callMap.respond(requestId, envelope)`
+9. On failure: `mapError` converts the thrown value to `CallError`, publish `call.error`
 
-The `CallHandler` is designed to be wired into a pubsub subscription:
+**Key change**: In the pre-envelope model, handlers were responsible for publishing `call.responded` themselves (the handler return value was discarded). In the envelope model, `CallHandler` owns wrapping and publishing. Handler return values are captured and wrapped. This ensures every response goes through the envelope pipeline — no raw values can bypass it.
 
-```ts
-const callHandler = buildCallHandler({ registry, eventTarget })
-pubsub.subscribe("call.requested", callHandler)
-```
+### MCP and OpenAPI Handlers
+
+Adapter handlers (from `from_mcp` and `from_openapi`) return pre-built `ResponseEnvelope` instances via `mcpEnvelope()` and `httpEnvelope()` factory functions. When `CallHandler` detects `isResponseEnvelope()` on the result, it passes through without re-wrapping. This means adapter metadata (HTTP status codes, MCP `isError` flags) is preserved.
+
+For MCP results with `meta.isError: true`, the handler still returns an envelope — the error is represented as data, not thrown. Only thrown exceptions trigger `call.error`.
 
 ## Access Control
 
 ### Enforcement Point
 
-`CallHandler` enforces `AccessControl` before dispatching to `registry.execute()`. Direct `registry.execute()` calls bypass access control — this is by design for trusted internal calls.
+`CallHandler` enforces `AccessControl` before calling the handler directly. Direct `registry.execute()` calls bypass access control — this is by design for trusted internal calls.
 
 ### Flow
 
@@ -251,8 +264,8 @@ Operations declare their possible errors via `errorSchemas` on `IOperationDefini
 
 Routing is an env construction concern, not a separate protocol layer. `buildEnv` creates the `OperationEnv`:
 
-- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()` directly
-- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, publishing `call.requested` events with `parentRequestId` propagation
+- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()` directly, returning `Promise<ResponseEnvelope>`
+- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, which resolves to `Promise<ResponseEnvelope>`, publishing `call.requested` events with `parentRequestId` propagation
 
 `parentRequestId` enables call graph reconstruction and abort cascading — every nested call includes it.
 
@@ -278,10 +291,10 @@ async function* subscribe(
   operationId: string,
   input: unknown,
   context: OperationContext,
-): AsyncGenerator<unknown, void, unknown>
+): AsyncGenerator<ResponseEnvelope, void, unknown>
 ```
 
-Gets the operation from the registry, casts its handler to `AsyncGenerator`, and yields values. Properly cleans up with `generator.return()` in a `finally` block.
+Gets the operation from the registry, casts its handler to `AsyncGenerator`, and yields each value wrapped in `ResponseEnvelope`. If a yielded value `isResponseEnvelope()`, it passes through (e.g., for adapter handlers). Otherwise, `localEnvelope(value, operationId)` wraps it with a fresh `timestamp` per yield. Properly cleans up with `generator.return()` in a `finally` block.
 
 Use `subscribe()` for in-process consumption. Use `PendingRequestMap.call()` for cross-transport invocation that resolves after one event. For cross-transport streaming, use `PendingRequestMap.subscribe()` to yield multiple events.
 
@@ -293,3 +306,10 @@ The `subscribe()` function looks up both spec and handler separately from the re
 2. `registry.getHandler(operationId)` — throws if handler not found
 
 This allows spec-only registration for scenarios where handlers are provided separately (e.g., ujsx host interpretation, dynamic handler injection).
+
+## References
+
+- [response-envelopes.md](response-envelopes.md) — `ResponseEnvelope` types, factory functions, detection, and integration points
+- [ADR-005](decisions/005-response-envelopes.md) — Design rationale for response envelopes
+- [api-surface.md](api-surface.md) — Public API surface (types and signatures)
+- [adapters.md](adapters.md) — MCP and OpenAPI adapter internals

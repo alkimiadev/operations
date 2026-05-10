@@ -1,11 +1,11 @@
 ---
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-10
 ---
 
 # API Surface
 
-All public types, registry, call protocol, subscribe, env, validation, and adapters. See [call-protocol.md](call-protocol.md) for detailed call protocol semantics and [adapters.md](adapters.md) for adapter internals.
+All public types, registry, call protocol, subscribe, env, validation, adapters, and response envelopes. See [call-protocol.md](call-protocol.md) for detailed call protocol semantics, [response-envelopes.md](response-envelopes.md) for the envelope type system and integration points, and [adapters.md](adapters.md) for adapter internals.
 
 ## Core Types
 
@@ -72,6 +72,41 @@ const ErrorDefinitionSchema = Type.Object({
 
 Declared on `IOperationDefinition.errorSchemas`. Contract between operation and callers about what errors it may produce.
 
+### Response Envelope Types
+
+All operation results are wrapped in `ResponseEnvelope` at the call protocol boundary. See [response-envelopes.md](response-envelopes.md) for the full type system, factory functions, and integration points.
+
+```ts
+interface ResponseEnvelope<T = unknown> {
+  data: T
+  meta: ResponseMeta
+}
+
+type ResponseMeta = LocalResponseMeta | HTTPResponseMeta | MCPResponseMeta
+type ResponseSource = "local" | "http" | "mcp"
+
+interface LocalResponseMeta {
+  source: "local"
+  operationId: string
+  timestamp: number
+}
+
+interface HTTPResponseMeta {
+  source: "http"
+  statusCode: number
+  headers: Record<string, string>
+  contentType: string
+}
+
+interface MCPResponseMeta {
+  source: "mcp"
+  isError: boolean
+  content: MCPContentBlock[]
+  structuredContent?: Record<string, unknown>
+  _meta?: Record<string, unknown>
+}
+```
+
 ### `OperationContext`
 
 ```ts
@@ -127,15 +162,17 @@ type SubscriptionHandler<TInput, TOutput, TContext> = (
 ) => AsyncGenerator<TOutput, void, unknown>
 ```
 
-`OperationHandler` returns a single value. `SubscriptionHandler` yields values over time.
+`OperationHandler` returns a single value. `SubscriptionHandler` yields values over time. Both return/yield **raw values** — wrapping in `ResponseEnvelope` happens in infrastructure (`execute()`, `CallHandler`, `subscribe()`). Handlers that need to provide transport metadata can return a pre-built `ResponseEnvelope` (detected by `isResponseEnvelope()`), but this is only needed for adapter handlers (MCP, OpenAPI).
 
 ### `OperationEnv`
 
 ```ts
-type OperationEnv = Record<string, Record<string, (input: unknown) => Promise<unknown>>>
+type OperationEnv = Record<string, Record<string, (input: unknown) => Promise<ResponseEnvelope>>>
 ```
 
-Namespace-keyed operation map. Accessed as `env.namespace.operationName(input)`. Created by `buildEnv`.
+Namespace-keyed operation map. Accessed as `env.namespace.operationName(input)`. Created by `buildEnv`. Each inner function returns `Promise<ResponseEnvelope>` — callers access typed data via `envelope.data` and metadata via `envelope.meta`, or use `unwrap(envelope)` for the common case where only `data` is needed.
+
+**Type note**: `OperationEnv` inner functions return `Promise<ResponseEnvelope>` (untyped), which means callers lose per-operation type inference through `OperationEnv`. The generic `TOutput` of the underlying operation is not propagated through the namespace-keyed map — this is an inherent limitation of the string-keyed access pattern. Consumers should use `envelope.data` with their own type narrowing, or use `registry.execute()` directly when type inference is needed.
 
 ## Registry
 
@@ -155,13 +192,13 @@ The registry stores specs and handlers in separate internal maps. Specs are seri
 | `getByName(namespace, name)` | `(namespace: string, name: string) => (OperationSpec & { handler?: ... }) \| undefined` | Get by parts. |
 | `list()` | `() => Array<OperationSpec & { handler?: ... }>` | All registered entries (spec + handler if present). |
 | `getAllSpecs()` | `() => OperationSpec[]` | All serializable specs. |
-| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<TOutput>` | Validate input, run handler, warn on output mismatch. Throws if spec or handler not found. |
+| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<ResponseEnvelope<TOutput>>` | Validate input, run handler, wrap result in `ResponseEnvelope`, warn on output mismatch. Throws if spec or handler not found. |
 
 Registration key format: `{namespace}.{name}`. Overwrite on duplicate.
 
 Specs and handlers can be registered independently: `registerSpec()` then `registerHandler()` for the same id, or `register()` with `{ ...spec, handler }` in one call. `execute()` requires both — throws `"Operation not found"` if spec missing, `"No handler registered"` if handler missing.
 
-`execute` validates input with `validateOrThrow` before calling the handler. Output validation uses `collectErrors` and logs warnings — it does not throw.
+`execute` validates input with `validateOrThrow` before calling the handler. The handler return value is wrapped in a `ResponseEnvelope` via `isResponseEnvelope()` detection — if the result is already an envelope, it passes through; otherwise `localEnvelope(result, operationId)` wraps it. Output validation uses `collectErrors` on `envelope.data` against `spec.outputSchema` and logs warnings — it does not throw.
 
 ## Call Protocol
 
@@ -172,8 +209,8 @@ See [call-protocol.md](call-protocol.md) for full semantics.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `constructor(eventTarget?)` | `(eventTarget?: EventTarget)` | Creates internal pubsub, wires subscription handlers for responded/error/aborted. |
-| `call(operationId, input, options?)` | `Promise<unknown>` | Publish `call.requested`, return Promise that resolves on `call.responded`. |
-| `respond(requestId, output)` | `void` | Publish `call.responded`. |
+| `call(operationId, input, options?)` | `Promise<ResponseEnvelope>` | Publish `call.requested`, return Promise that resolves with `ResponseEnvelope` on `call.responded`. |
+| `respond(requestId, output)` | `void` | Publish `call.responded`. `output` must be `ResponseEnvelope` — `isResponseEnvelope()` guard throws on raw values. |
 | `emitError(requestId, code, message, details?)` | `void` | Publish `call.error`. |
 | `abort(requestId)` | `void` | Publish `call.aborted`, reject pending Promise. |
 | `getPendingCount()` | `number` | Number of in-flight requests. |
@@ -184,7 +221,7 @@ See [call-protocol.md](call-protocol.md) for full semantics.
 type CallHandler = (event: CallRequestedEvent) => Promise<void>
 ```
 
-Created by `buildCallHandler({ registry, eventTarget? })`. Subscribes to `call.requested`, checks access control, validates input, executes via registry. On success: no-op (handler is expected to publish `call.responded` through the PendingRequestMap). On failure: throws `CallError`.
+Created by `buildCallHandler({ registry, eventTarget? })`. Subscribes to `call.requested`, checks access control, validates input, calls the handler directly (not via `registry.execute()`), applies the shared result pipeline (detect → wrap → normalize → validate), and publishes `call.responded`. On failure: publishes `call.error` with mapped `CallError`. Adapters that return pre-built envelopes (MCP, OpenAPI) pass through via `isResponseEnvelope()` detection. See [response-envelopes.md](response-envelopes.md#shared-result-pipeline) for the shared pipeline definition.
 
 ### `CallEventMap`
 
@@ -204,7 +241,7 @@ Typed event map compatible with `@alkdev/pubsub`. See [call-protocol.md](call-pr
 | Type | Fields | Description |
 |------|--------|-------------|
 | `CallRequestedEvent` | `requestId, operationId, input, parentRequestId?, deadline?, identity?` | Initiates a call |
-| `CallRespondedEvent` | `requestId, output` | Successful response |
+| `CallRespondedEvent` | `requestId, output: ResponseEnvelope` | Successful response (envelope always present) |
 | `CallAbortedEvent` | `requestId` | Call cancelled |
 | `CallErrorEvent` | `requestId, code, message, details?` | Error response |
 
@@ -213,15 +250,15 @@ Typed event map compatible with `@alkdev/pubsub`. See [call-protocol.md](call-pr
 ### `subscribe`
 
 ```ts
-function subscribe(
+async function* subscribe(
   registry: OperationRegistry,
   operationId: string,
   input: unknown,
   context: OperationContext,
-): AsyncGenerator<unknown, void, unknown>
+): AsyncGenerator<ResponseEnvelope, void, unknown>
 ```
 
-Direct subscription execution. Gets the operation, casts its handler to `AsyncGenerator`, yields each value. Properly cleans up the generator on iteration stop (calls `generator.return()` in `finally`).
+Direct subscription execution. Gets the operation, casts its handler to `AsyncGenerator`, yields each value wrapped in `ResponseEnvelope`. If a yielded value is already an envelope (`isResponseEnvelope()`), it passes through. Otherwise, `localEnvelope(value, operationId)` wraps it. Properly cleans up the generator on iteration stop (calls `generator.return()` in `finally`).
 
 This is the synchronous alternative to the call protocol's `call.requested` → `call.responded` flow for subscriptions. Use `subscribe()` for in-process subscription consumption; use `PendingRequestMap` for cross-transport subscription.
 
@@ -240,10 +277,10 @@ interface EnvOptions {
 }
 ```
 
-Creates a namespace-keyed `OperationEnv` for nested operation calls. Two modes:
+Creates a namespace-keyed `OperationEnv` for nested operation calls. Each env function returns `Promise<ResponseEnvelope>` — callers access typed data via `envelope.data` or use `unwrap(envelope)`. Two modes:
 
-- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()`
-- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, publishing `call.requested` events with `parentRequestId` for call graph tracking
+- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()`, which wraps in `localEnvelope`
+- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, which resolves to `ResponseEnvelope` directly, publishing `call.requested` events with `parentRequestId` for call graph tracking
 
 `SUBSCRIPTION` operations are filtered out — env only provides QUERY and MUTATION operations for nested calls.
 
@@ -305,6 +342,20 @@ function FromSchema<T>(T: T): TSchema
 Converts JSON Schema to TypeBox `TSchema`. Handles: `allOf`, `anyOf`, `oneOf`, `enum`, `object` (with `required` tracking), `tuple`, `array`, `const`, `$ref`, primitives (`string`, `number`, `integer`, `boolean`, `null`). Unknown shapes fall back to `Type.Unknown()`.
 
 Used internally by `FromOpenAPI` to convert OpenAPI JSON Schema definitions to TypeBox. Also used by `from_mcp` to convert MCP tool `inputSchema` (which is JSON Schema).
+
+## Response Envelope Utilities
+
+See [response-envelopes.md](response-envelopes.md) for detailed semantics and integration points.
+
+| Export | Signature | Description |
+|--------|-----------|-------------|
+| `isResponseEnvelope(value)` | `(unknown) => value is ResponseEnvelope` | Type guard. Checks `meta.source` discriminant against `"local" \| "http" \| "mcp"`. |
+| `localEnvelope(data, operationId)` | `<T>(data: T, operationId: string) => ResponseEnvelope<T>` | Wrap local handler result. |
+| `httpEnvelope(data, meta)` | `<T>(data: T, meta: Omit<HTTPResponseMeta, "source">) => ResponseEnvelope<T>` | Wrap HTTP response data. |
+| `mcpEnvelope(data, meta)` | `<T>(data: T, meta: Omit<MCPResponseMeta, "source">) => ResponseEnvelope<T>` | Wrap MCP tool result. |
+| `unwrap(envelope)` | `<T>(envelope: ResponseEnvelope<T>) => T` | Convenience: returns `envelope.data`. |
+| `ResponseEnvelopeSchema` | `TSchema` | TypeBox schema for `ResponseEnvelope`. |
+| `ResponseMetaSchema` | `TSchema` | TypeBox schema for the `ResponseMeta` discriminated union. |
 
 ## Adapters
 
