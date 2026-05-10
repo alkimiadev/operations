@@ -370,3 +370,34 @@ See [adapters.md](adapters.md) for detailed adapter documentation.
 | `closeMCPClient` | `from-mcp` sub-path | Close MCP client connection |
 | `MCPClientLoader` | `from-mcp` sub-path | Manage multiple MCP servers |
 | `scanOperations` | Main barrel | Filesystem auto-discovery of operation specs |
+
+## Source vs. Spec Drift
+
+This section documents differences between the architecture spec (this document) and the current source code. Items marked **ADR-005** or **ADR-006** are planned changes not yet implemented.
+
+### ADR-005 (Response Envelopes) — not yet implemented
+
+| What | Spec says | Source currently does |
+|------|----------|----------------------|
+| `ResponseEnvelope`, `ResponseMeta`, factory functions, `isResponseEnvelope()`, `unwrap()` | Exported from `src/response-envelope.ts` | None of these types or functions exist in source |
+| `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
+| `execute()` result pipeline | Detect → wrap → normalize → validate | Returns raw `result`, validates raw output with `collectErrors` |
+| `OperationEnv` inner function return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
+| `PendingRequestMap.call()` return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
+| `PendingRequestMap.respond()` validation | Enforces `isResponseEnvelope()`, throws on raw values | Accepts `unknown`, no validation |
+| `subscribe()` yield type | `AsyncGenerator<ResponseEnvelope, void, unknown>` | `AsyncGenerator<unknown, void, unknown>` |
+| `CallRespondedEvent.output` | `ResponseEnvelope` | `unknown` |
+| `CallHandler` description | Wraps handler result, applies pipeline, publishes `call.responded` | Discards handler return value; handler publishes `call.responded` itself |
+| `from_mcp` handler | Returns `mcpEnvelope()`, uses `structuredContent`, extracts `outputSchema` | Returns `result.content`, types `outputSchema` as `Type.Unknown()`, throws on `isError` |
+| `from_openapi` handler | Returns `httpEnvelope()` with HTTP metadata | Returns raw response data, throws on HTTP error status |
+
+### ADR-006 (Unified Invocation Path) — not yet implemented
+
+| What | Spec says | Source currently does |
+|------|----------|----------------------|
+| `execute()` access control | Checks `accessControl` when `identity` present | Skips access control entirely |
+| `execute()` on unauthenticated access | Rejects with `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | Always allows |
+| `execute()` error type | Throws `CallError` | Throws plain `Error` |
+| `buildEnv()` | Always uses `execute()`, no `callMap` option | Toggles between `execute()` and `callMap.call()` |
+| `CallHandler` | Thin adapter calling `registry.execute()` | Reimplements lookup, validation, and access control |
+| `OperationContext.trusted` | New field for nested call auth bypass | Does not exist |

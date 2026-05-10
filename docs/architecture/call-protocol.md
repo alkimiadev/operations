@@ -307,6 +307,42 @@ The `subscribe()` function looks up both spec and handler separately from the re
 
 This allows spec-only registration for scenarios where handlers are provided separately (e.g., ujsx host interpretation, dynamic handler injection).
 
+## Source vs. Spec Drift
+
+This section documents differences between the architecture spec (this document) and the current source code. Items marked **ADR-005** or **ADR-006** are planned changes not yet implemented. Items marked **Bug** are unintentional discrepancies.
+
+### ADR-005 (Response Envelopes) — not yet implemented
+
+| What | Spec says | Source currently does |
+|------|----------|----------------------|
+| `CallEventSchema["call.responded"].output` | `ResponseEnvelopeSchema` | `Type.Unknown()` |
+| `CallHandler` behavior | Wraps handler return value, publishes `call.responded` | Discards handler return value; handler must publish itself |
+| `CallHandler` error handling | Publishes `call.error` via pubsub | Re-throws `CallError` (does not publish) |
+| `call()` return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
+| `call()` resolution | Resolves with `ResponseEnvelope` from `output` field | Resolves with raw `unknown` from `output` |
+| `respond()` validation | Enforces `isResponseEnvelope()` guard, throws on raw values | Accepts `unknown`, no validation |
+| `subscribe()` yield type | `AsyncGenerator<ResponseEnvelope, void, unknown>`, wraps yields | `AsyncGenerator<unknown, void, unknown>`, yields raw values |
+| `buildEnv()` return types | `Promise<ResponseEnvelope>` per function | `Promise<unknown>` per function |
+
+### ADR-006 (Unified Invocation Path) — not yet implemented
+
+| What | Spec says | Source currently does |
+|------|----------|----------------------|
+| `execute()` access control | Checks `accessControl` when `identity` present | Skips access control entirely |
+| `execute()` unauthenticated calls | Rejects with `ACCESS_DENIED` when `requiredScopes` non-empty and `identity` absent | Always allows (no access check) |
+| `CallHandler` calls `execute()` | Thin adapter that calls `registry.execute()` internally | Reimplements lookup, validation, and access control independently |
+| `buildEnv()` | Always uses `execute()`, no `callMap` option | Toggles between `execute()` and `callMap.call()` via `if (callMap)` |
+| `OperationContext.trusted` | New field for nested call bypass | Does not exist |
+| `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
+| `execute()` error type | Throws `CallError` | Throws plain `Error` |
+
+### Bugs
+
+| What | Description |
+|------|-------------|
+| `checkAccess()` resource check bypass | When `identity.resources` is `undefined` (falsy), the resource access check at `call.ts:248` (`if (resourceType && resourceAction && identity.resources)`) evaluates to `false` and falls through to `return true` — granting access even though `resourceType`/`resourceAction` are declared on the operation. This means an identity without any declared resources passes resource-level access control for operations that require it. ADR-006's default-deny rule (`ACCESS_DENIED` when required scopes/resources are missing) would fix this. |
+| `PendingRequestMap` type name conflict | `src/env.ts` exports a `PendingRequestMap` **interface** (reduced signature: missing `deadline`, `identity` typed as `unknown`). `src/call.ts` exports the **class** `PendingRequestMap` which has the full signature. `src/index.ts` re-exports the interface as `PendingRequestMap` and the class as `PendingRequestMapClass`. This naming creates confusion — the documented `PendingRequestMap` refers to the class, but importing the type gives the reduced interface. |
+
 ## References
 
 - [response-envelopes.md](response-envelopes.md) — `ResponseEnvelope` types, factory functions, detection, and integration points
