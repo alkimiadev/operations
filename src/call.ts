@@ -1,9 +1,12 @@
-import { Type, type Static } from "@alkdev/typebox";
+import { Type, type Static, KindGuard } from "@alkdev/typebox";
+import { Value } from "@alkdev/typebox/value";
 import { createPubSub, type PubSub } from "@alkdev/pubsub";
 import { getLogger } from "@logtape/logtape";
 import { OperationRegistry } from "./registry.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
-import { validateOrThrow } from "./validation.js";
+import { validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
+import { ResponseEnvelopeSchema, isResponseEnvelope, localEnvelope } from "./response-envelope.js";
+import type { ResponseEnvelope } from "./response-envelope.js";
 import type { Identity, OperationContext, AccessControl, OperationSpec } from "./types.js";
 
 const logger = getLogger("operations:call");
@@ -23,7 +26,7 @@ export const CallEventSchema = {
   }),
   "call.responded": Type.Object({
     requestId: Type.String(),
-    output: Type.Unknown(),
+    output: ResponseEnvelopeSchema,
   }),
   "call.aborted": Type.Object({
     requestId: Type.String(),
@@ -52,7 +55,7 @@ type CallPubSubMap = {
 };
 
 interface PendingRequest {
-  resolve: (value: unknown) => void;
+  resolve: (value: ResponseEnvelope) => void;
   reject: (reason: unknown) => void;
   deadline?: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -60,7 +63,7 @@ interface PendingRequest {
 
 export interface CallHandlerConfig {
   registry: OperationRegistry;
-  eventTarget?: EventTarget;
+  callMap?: PendingRequestMap;
 }
 
 export type CallHandler = (event: CallRequestedEvent) => Promise<void>;
@@ -85,7 +88,7 @@ export class PendingRequestMap {
         if (pending) {
           if (pending.timer) clearTimeout(pending.timer);
           this.requests.delete(responded.requestId);
-          pending.resolve(responded.output);
+          pending.resolve(responded.output as ResponseEnvelope);
         }
       }
     })();
@@ -121,7 +124,7 @@ export class PendingRequestMap {
     operationId: string,
     input: unknown,
     options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
-  ): Promise<unknown> {
+  ): Promise<ResponseEnvelope> {
     const requestId = crypto.randomUUID();
 
     return new Promise((resolve, reject) => {
@@ -148,7 +151,10 @@ export class PendingRequestMap {
     });
   }
 
-  respond(requestId: string, output: unknown): void {
+  respond(requestId: string, output: ResponseEnvelope): void {
+    if (!isResponseEnvelope(output)) {
+      throw new Error("PendingRequestMap.respond() requires a ResponseEnvelope. Use isResponseEnvelope() to check values before calling respond().");
+    }
     this.pubsub.publish("call.responded", "", {
       requestId,
       output,
@@ -180,7 +186,7 @@ export class PendingRequestMap {
 }
 
 export function buildCallHandler(config: CallHandlerConfig): CallHandler {
-  const { registry } = config;
+  const { registry, callMap } = config;
 
   return async (event: CallRequestedEvent): Promise<void> => {
     const { requestId, operationId, input, identity } = event;
@@ -223,11 +229,35 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
 
       validateOrThrow(spec.inputSchema, input, `Input validation for ${operationId}`);
 
-      await handler(input, context);
+      const result = await handler(input, context);
+
+      let envelope: ResponseEnvelope;
+      if (isResponseEnvelope(result)) {
+        envelope = result as ResponseEnvelope;
+      } else {
+        envelope = localEnvelope(result, operationId);
+      }
+
+      if (!KindGuard.IsUnknown(spec.outputSchema)) {
+        envelope.data = Value.Cast(spec.outputSchema, envelope.data);
+      }
+
+      const errors = collectErrors(spec.outputSchema, envelope.data);
+      if (errors.length > 0) {
+        logger.warn(`Output validation failed for ${operationId}:\n${formatValueErrors(errors)}`);
+      }
+
+      if (callMap) {
+        callMap.respond(requestId, envelope);
+      }
 
     } catch (error) {
       const callError = mapError(error);
-      throw callError;
+      if (callMap) {
+        callMap.emitError(requestId, callError.code, callError.message, callError.details);
+      } else {
+        throw callError;
+      }
     }
   };
 }
