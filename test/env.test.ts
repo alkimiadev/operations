@@ -20,7 +20,7 @@ function makeOperation(name: string, handler?: any): IOperationDefinition {
 }
 
 describe("buildEnv", () => {
-  it("creates namespace-keyed env in direct mode", async () => {
+  it("creates namespace-keyed env", async () => {
     const registry = new OperationRegistry();
     registry.register(makeOperation("readFile"));
     registry.register(makeOperation("writeFile"));
@@ -40,7 +40,7 @@ describe("buildEnv", () => {
     expect(result.data).toEqual({ result: "test" });
   });
 
-  it("returns ResponseEnvelope with local source from direct mode", async () => {
+  it("returns ResponseEnvelope with local source", async () => {
     const registry = new OperationRegistry();
     registry.register(makeOperation("op1"));
 
@@ -59,7 +59,7 @@ describe("buildEnv", () => {
     expect(result.data).toEqual({ result: "hello" });
   });
 
-  it("passes pre-built ResponseEnvelope through from handler in direct mode", async () => {
+  it("passes pre-built ResponseEnvelope through from handler", async () => {
     const registry = new OperationRegistry();
     const httpEnv = httpEnvelope({ items: [1, 2, 3] }, {
       statusCode: 200,
@@ -245,7 +245,7 @@ describe("buildEnv", () => {
     expect(env.other.op2).toBeDefined();
   });
 
-  it("Value.Cast normalization applies in direct mode via execute", async () => {
+  it("applies Value.Cast normalization via execute", async () => {
     const registry = new OperationRegistry();
     registry.register({
       name: "withDefaults",
