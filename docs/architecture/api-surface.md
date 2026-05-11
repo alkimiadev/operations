@@ -1,5 +1,5 @@
 ---
-status: draft
+status: stable
 last_updated: 2026-05-11
 ---
 
@@ -367,22 +367,3 @@ See [adapters.md](adapters.md) for detailed adapter documentation.
 | `MCPClientLoader` | `from-mcp` sub-path | Manage multiple MCP servers |
 | `scanOperations` | Main barrel | Filesystem auto-discovery of operation specs |
 
-## Source vs. Spec Drift
-
-This section documents differences between the architecture spec (this document) and the current source code.
-
-### ADR-005 (Response Envelopes) — ✅ Implemented
-
-All ADR-005 changes have been implemented in source. No remaining drift.
-
-### ADR-006 (Unified Invocation Path) — ✅ Implemented in source
-
-| What | Spec says | Source now does |
-|------|----------|----------------|
-| `execute()` access control | Checks `accessControl` when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — checks access control unless `context.trusted` |
-| `execute()` error type | Throws `CallError` | ✅ `CallError(OPERATION_NOT_FOUND)`, `CallError(ACCESS_DENIED)`, `CallError(VALIDATION_ERROR)` |
-| `buildEnv()` | Always uses `execute()`, no `callMap` option | ✅ `callMap` removed, always calls `registry.execute()` with `trusted: true` |
-| `CallHandler` | Thin adapter calling `registry.execute()` | ✅ Delegates to `registry.execute()`, publishes events |
-| `OperationContext.trusted` | New field for nested call auth bypass | ✅ Added to `OperationContextSchema` and type |
-| `subscribe()` access control | Checks access control when `identity` present | ✅ Implemented — same logic as `execute()` |
-| `checkAccess()` export | Available for external use | ✅ Exported from `call.ts` and `index.ts` |

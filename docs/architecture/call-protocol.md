@@ -1,5 +1,5 @@
 ---
-status: draft
+status: stable
 last_updated: 2026-05-11
 ---
 
@@ -301,25 +301,6 @@ The `subscribe()` function looks up both spec and handler separately from the re
 2. `registry.getHandler(operationId)` — throws if handler not found
 
 This allows spec-only registration for scenarios where handlers are provided separately (e.g., ujsx host interpretation, dynamic handler injection).
-
-## Source vs. Spec Drift
-
-This section documents differences between the architecture spec (this document) and the current source code.
-
-### ADR-005 (Response Envelopes) — ✅ Implemented
-
-All ADR-005 changes have been implemented in source. No remaining drift.
-
-### ADR-006 (Unified Invocation Path) — ✅ Implemented in source
-
-| What | Spec says | Source now does |
-|------|----------|----------------|
-| `execute()` access control | Checks `accessControl` when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — checks access control unless `context.trusted` |
-| `CallHandler` calls `execute()` | Thin adapter that calls `registry.execute()` internally | ✅ Delegates to `registry.execute()`, publishes events |
-| `buildEnv()` | Always uses `execute()`, no `callMap` option | ✅ `callMap` removed, always calls `registry.execute()` with `trusted: true` |
-| `OperationContext.trusted` | New field for nested call bypass | ✅ Added to `OperationContextSchema` and type |
-| `execute()` error type | Throws `CallError` | ✅ `CallError(OPERATION_NOT_FOUND)`, `CallError(ACCESS_DENIED)`, `CallError(VALIDATION_ERROR)` |
-| `subscribe()` access control | Checks access control when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — same logic as `execute()` |
 
 ## References
 
