@@ -58,7 +58,7 @@ interface PendingRequest {
 
 export interface CallHandlerConfig {
   registry: OperationRegistry;
-  callMap?: PendingRequestMap;
+  callMap: PendingRequestMap;
 }
 
 export type CallHandler = (event: CallRequestedEvent) => Promise<void>;
@@ -194,17 +194,11 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
 
     try {
       const envelope = await registry.execute(operationId, input, context);
-
-      if (callMap) {
-        callMap.respond(requestId, envelope);
-      }
+      callMap.respond(requestId, envelope);
     } catch (error) {
-      const callError = mapError(error);
-      if (callMap) {
-        callMap.emitError(requestId, callError.code, callError.message, callError.details);
-      } else {
-        throw callError;
-      }
+      const spec = registry.getSpec(operationId);
+      const callError = mapError(error, spec?.errorSchemas);
+      callMap.emitError(requestId, callError.code, callError.message, callError.details);
     }
   };
 }

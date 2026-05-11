@@ -512,66 +512,26 @@ describe("CallHandler", () => {
     }
   });
 
-  it("throws error when no callMap and operation not found", async () => {
+  it("publishes call.error for unknown operations with mapError defaults", async () => {
     const registry = new OperationRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.nonexistent",
-        input: {},
-      }),
-    ).rejects.toThrow("Operation not found");
-  });
+    const callPromise = callMap.call("test.nonexistent", {});
 
-  it("throws error when no callMap and access denied", async () => {
-    const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
-
-    const identity: Identity = { id: "user1", scopes: [] };
-
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).rejects.toThrow("Access denied");
-  });
-
-  it("works without callMap for successful operations", async () => {
-    const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
-
-    const identity: Identity = {
-      id: "user1",
-      scopes: [],
-      resources: { "project:abc": ["read"] },
-    };
-
-    const result = await handler({
-      requestId: "r1",
-      operationId: "test.guarded",
-      input: {},
-      identity,
-    });
-
-    expect(result).toBeUndefined();
-  });
-
-  it("works without callMap for open operations", async () => {
-    const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
-
-    const result = await handler({
-      requestId: "r1",
-      operationId: "test.open",
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.nonexistent",
       input: {},
     });
 
-    expect(result).toBeUndefined();
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.OPERATION_NOT_FOUND);
+    }
   });
 
   it("applies Value.Cast normalization via execute()", async () => {
@@ -631,6 +591,44 @@ describe("CallHandler", () => {
     const result = await callPromise;
     expect(result.data).toEqual({ name: "test", extra: "field" });
   });
+
+  it("maps errors using spec errorSchemas", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "customError",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "op with custom errors",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+      errorSchemas: [
+        { code: "NOT_FOUND", description: "Item not found", schema: Type.Object({ id: Type.String() }) },
+      ],
+      handler: async () => { throw new Error("NOT_FOUND: item 42"); },
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    const callPromise = callMap.call("test.customError", {});
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.customError",
+      input: {},
+    });
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe("NOT_FOUND");
+      expect((error as CallError).message).toBe("NOT_FOUND: item 42");
+    }
+  });
 });
 
 describe("checkAccess resource access control", () => {
@@ -670,39 +668,58 @@ describe("checkAccess resource access control", () => {
 
   it("denies access when resourceType/resourceAction are set and identity.resources is undefined", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = { id: "user1", scopes: [] };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).rejects.toThrow("Access denied");
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
   });
 
   it("denies access when resourceType/resourceAction are set and identity.resources is empty", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = { id: "user1", scopes: [], resources: {} };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).rejects.toThrow("Access denied");
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
   });
 
   it("denies access when identity.resources has no matching resource type", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = {
       id: "user1",
@@ -710,19 +727,28 @@ describe("checkAccess resource access control", () => {
       resources: { "document:abc": ["read"] },
     };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).rejects.toThrow("Access denied");
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
   });
 
   it("denies access when identity.resources has matching type but wrong action", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = {
       id: "user1",
@@ -730,19 +756,28 @@ describe("checkAccess resource access control", () => {
       resources: { "project:abc": ["write"] },
     };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).rejects.toThrow("Access denied");
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
   });
 
   it("grants access when identity.resources has matching type and action", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = {
       id: "user1",
@@ -750,33 +785,43 @@ describe("checkAccess resource access control", () => {
       resources: { "project:abc": ["read"] },
     };
 
-    const result = await handler({
-      requestId: "r1",
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
     });
-    expect(result).toBeUndefined();
+
+    const result = await callPromise;
+    expect(result.data).toEqual({ ok: true });
   });
 
   it("grants access when neither resourceType nor resourceAction are set", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = { id: "user1", scopes: [] };
 
-    const result = await handler({
-      requestId: "r1",
+    const callPromise = callMap.call("test.open", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
       operationId: "test.open",
       input: {},
       identity,
     });
-    expect(result).toBeUndefined();
+
+    const result = await callPromise;
+    expect(result.data).toEqual({ ok: true });
   });
 
   it("grants access when identity.resources matches and identity has no scopes required", async () => {
     const registry = makeRegistry();
-    const handler = buildCallHandler({ registry });
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
 
     const identity: Identity = {
       id: "user1",
@@ -784,12 +829,16 @@ describe("checkAccess resource access control", () => {
       resources: { "project:xyz": ["read", "write"] },
     };
 
-    const result = await handler({
-      requestId: "r1",
+    const callPromise = callMap.call("test.guarded", {}, { identity });
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
     });
-    expect(result).toBeUndefined();
+
+    const result = await callPromise;
+    expect(result.data).toEqual({ ok: true });
   });
 });
