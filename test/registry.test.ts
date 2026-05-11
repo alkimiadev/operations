@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { OperationRegistry } from "../src/registry.js";
 import { OperationType, type IOperationDefinition, type OperationContext, type OperationSpec, type OperationHandler } from "../src/index.js";
 import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "../src/response-envelope.js";
+import { CallError, InfrastructureErrorCode } from "../src/error.js";
 import * as Type from "@alkdev/typebox";
 import { Value } from "@alkdev/typebox/value";
 
@@ -158,19 +159,27 @@ describe("OperationRegistry", () => {
     ).rejects.toThrow();
   });
 
-  it("throws on missing operation", async () => {
+  it("throws CallError on missing operation", async () => {
     const registry = new OperationRegistry();
-    await expect(
-      registry.execute("missing.op", {}, {} as OperationContext)
-    ).rejects.toThrow("Operation not found");
+    try {
+      await registry.execute("missing.op", {}, {} as OperationContext);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.OPERATION_NOT_FOUND);
+    }
   });
 
-  it("throws on missing handler", async () => {
+  it("throws CallError on missing handler", async () => {
     const registry = new OperationRegistry();
     registry.registerSpec(makeSpec());
-    await expect(
-      registry.execute("test.testOp", { value: "hello" }, {} as OperationContext)
-    ).rejects.toThrow("No handler registered");
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.OPERATION_NOT_FOUND);
+    }
   });
 
   it("registerSpec and registerHandler separately", async () => {
@@ -220,5 +229,176 @@ describe("OperationRegistry", () => {
     const spec = registry.getSpec("test.testOp")!;
     expect(spec.name).toBe("testOp");
     expect((spec as any).handler).toBeUndefined();
+  });
+});
+
+describe("OperationRegistry access control", () => {
+  it("denies access when requiredScopes are set and no identity provided", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["admin"] },
+    }));
+
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
+  });
+
+  it("denies access when identity lacks required scopes", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["admin", "write"] },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: ["read"] },
+    };
+
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, context);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
+  });
+
+  it("grants access when identity has all required scopes", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["read", "write"] },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: ["read", "write", "admin"] },
+    };
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, context);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("grants access when no scopes are required", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: [] },
+    }));
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("denies access when requiredScopesAny requires at least one scope and identity has none", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: [], requiredScopesAny: ["admin", "write"] },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: ["read"] },
+    };
+
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, context);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
+  });
+
+  it("grants access when requiredScopesAny and identity has one matching scope", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: [], requiredScopesAny: ["admin", "write"] },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: ["write"] },
+    };
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, context);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("denies access when resourceType/resourceAction are set and identity has no resources", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: [], resourceType: "project", resourceAction: "read" },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: [] },
+    };
+
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, context);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
+  });
+
+  it("grants access when resourceType/resourceAction match identity resources", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: [], resourceType: "project", resourceAction: "read" },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: [], resources: { "project:abc": ["read", "write"] } },
+    };
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, context);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("skips access control when context.trusted is true", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["admin"] },
+    }));
+
+    const context: OperationContext = {
+      identity: { id: "user1", scopes: ["read"] },
+      trusted: true,
+    };
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, context);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("skips access control when context.trusted is true even without identity", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["admin"] },
+    }));
+
+    const context: OperationContext = { trusted: true };
+
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, context);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("denies access when identity is missing but requiredScopes are set", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      accessControl: { requiredScopes: ["read"] },
+    }));
+
+    const context: OperationContext = {};
+
+    try {
+      await registry.execute("test.testOp", { value: "hello" }, context);
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+      expect((error as CallError).message).toContain("identity required");
+    }
   });
 });

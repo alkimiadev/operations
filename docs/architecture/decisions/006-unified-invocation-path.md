@@ -1,6 +1,6 @@
 ---
-status: draft
-last_updated: 2026-05-10
+status: implemented
+last_updated: 2026-05-11
 ---
 
 # ADR-006: Unified Invocation Path

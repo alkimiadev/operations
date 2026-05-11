@@ -1,24 +1,18 @@
 import { OperationType } from "./types.js";
-import type { OperationContext, OperationEnv, Identity } from "./types.js";
+import type { OperationContext, OperationEnv } from "./types.js";
 import type { OperationRegistry } from "./registry.js";
-import type { ResponseEnvelope } from "./response-envelope.js";
 import { getLogger } from "@logtape/logtape";
 
 const logger = getLogger("operations:env");
-
-export interface CallMap {
-  call(operationId: string, input: unknown, options?: { parentRequestId?: string; deadline?: number; identity?: Identity }): Promise<ResponseEnvelope>;
-}
 
 export interface EnvOptions {
   registry: OperationRegistry;
   context: OperationContext;
   allowedNamespaces?: string[];
-  callMap?: CallMap;
 }
 
 export function buildEnv(options: EnvOptions): OperationEnv {
-  const { registry, context, allowedNamespaces, callMap } = options;
+  const { registry, context, allowedNamespaces } = options;
   const specs = registry.getAllSpecs();
 
   const namespaces: OperationEnv = {};
@@ -38,20 +32,15 @@ export function buildEnv(options: EnvOptions): OperationEnv {
 
     const operationId = `${spec.namespace}.${spec.name}`;
 
-    if (callMap) {
-      namespaces[spec.namespace][spec.name] = async (input: unknown) => {
-        logger.debug(`Call protocol: ${operationId}`);
-        return await callMap.call(operationId, input, {
-          parentRequestId: context.requestId,
-          identity: context.identity,
-        });
-      };
-    } else {
-      namespaces[spec.namespace][spec.name] = async (input: unknown) => {
-        logger.debug(`Executing: ${operationId}`);
-        return await registry.execute(operationId, input, context);
-      };
-    }
+    const nestedContext: OperationContext = {
+      ...context,
+      trusted: true,
+    };
+
+    namespaces[spec.namespace][spec.name] = async (input: unknown) => {
+      logger.debug(`Executing: ${operationId}`);
+      return await registry.execute(operationId, input, nestedContext);
+    };
   }
 
   return namespaces;

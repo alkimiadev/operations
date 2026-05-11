@@ -24,6 +24,7 @@ export const OperationContextSchema = Type.Object({
     scopes: Type.Array(Type.String()),
     resources: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String())))
   })),
+  trusted: Type.Optional(Type.Boolean({ description: "INTERNAL: set by buildEnv(), not by callers" })),
 }, {
   description: "Context provided to all operation handlers"
 });

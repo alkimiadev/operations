@@ -6,9 +6,10 @@ import { OperationType } from "../src/types.js";
 import type { OperationContext } from "../src/types.js";
 import { localEnvelope, httpEnvelope, mcpEnvelope, isResponseEnvelope } from "../src/response-envelope.js";
 import type { ResponseEnvelope, LocalResponseMeta } from "../src/response-envelope.js";
+import { CallError, InfrastructureErrorCode } from "../src/error.js";
 
-function makeContext(): OperationContext {
-  return { requestId: "test-req-1" };
+function makeContext(overrides: Partial<OperationContext> = {}): OperationContext {
+  return { requestId: "test-req-1", ...overrides };
 }
 
 function makeRegistry(
@@ -139,17 +140,21 @@ describe("subscribe", () => {
     expect(done.done).toBe(true);
   });
 
-  it("throws when operation spec not found", async () => {
+  it("throws CallError when operation spec not found", async () => {
     const registry = new OperationRegistry();
 
-    await expect(async () => {
+    try {
       for await (const _ of subscribe(registry, "nonexistent.op", {}, makeContext())) {
         // should not reach here
       }
-    }).rejects.toThrow("Operation not found: nonexistent.op");
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.OPERATION_NOT_FOUND);
+    }
   });
 
-  it("throws when handler not registered", async () => {
+  it("throws CallError when handler not registered", async () => {
     const registry = new OperationRegistry();
     registry.registerSpec({
       name: "unhandled",
@@ -162,11 +167,15 @@ describe("subscribe", () => {
       accessControl: { requiredScopes: [] },
     });
 
-    await expect(async () => {
+    try {
       for await (const _ of subscribe(registry, "test.unhandled", {}, makeContext())) {
         // should not reach here
       }
-    }).rejects.toThrow("No handler registered for operation: test.unhandled");
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.OPERATION_NOT_FOUND);
+    }
   });
 
   it("handles generator that yields nothing", async () => {
@@ -293,5 +302,82 @@ describe("subscribe", () => {
     }
 
     expect(returnCalled).toBe(true);
+  });
+
+  it("denies access when requiredScopes are set and no identity provided", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "guardedSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "guarded sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: ["admin"] },
+      handler: async function* (_input: unknown, _context: OperationContext) {
+        yield "should not reach";
+      },
+    });
+
+    try {
+      for await (const _ of subscribe(registry, "test.guardedSub", {}, makeContext())) {
+        // should not reach here
+      }
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+    }
+  });
+
+  it("grants access when identity has required scopes", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "guardedSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "guarded sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: ["read"] },
+      handler: async function* (_input: unknown, _context: OperationContext) {
+        yield "event1";
+      },
+    });
+
+    const context = makeContext({ identity: { id: "user1", scopes: ["read"] } });
+    const results: ResponseEnvelope[] = [];
+    for await (const envelope of subscribe(registry, "test.guardedSub", {}, context)) {
+      results.push(envelope);
+    }
+    expect(results).toHaveLength(1);
+    expect(results[0].data).toBe("event1");
+  });
+
+  it("skips access control when context.trusted is true", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "trustedSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "trusted sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: ["admin"] },
+      handler: async function* (_input: unknown, _context: OperationContext) {
+        yield "secret-event";
+      },
+    });
+
+    const context = makeContext({ trusted: true });
+    const results: ResponseEnvelope[] = [];
+    for await (const envelope of subscribe(registry, "test.trustedSub", {}, context)) {
+      results.push(envelope);
+    }
+    expect(results).toHaveLength(1);
+    expect(results[0].data).toBe("secret-event");
   });
 });

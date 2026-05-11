@@ -117,7 +117,7 @@ type OperationContext = Static<typeof OperationContextSchema> & {
 }
 ```
 
-Passed to every handler. `env` provides namespace-keyed access to other operations (via `buildEnv`). `stream` and `pubsub` support subscription and event patterns.
+Passed to every handler. `env` provides namespace-keyed access to other operations (via `buildEnv`). `stream` and `pubsub` support subscription and event patterns. `trusted` is set by `buildEnv()` for nested calls to skip redundant access control checks. It is not serialized in remote calls — trust does not cross process boundaries.
 
 ### `OperationSpec`
 
@@ -192,7 +192,7 @@ The registry stores specs and handlers in separate internal maps. Specs are seri
 | `getByName(namespace, name)` | `(namespace: string, name: string) => (OperationSpec & { handler?: ... }) \| undefined` | Get by parts. |
 | `list()` | `() => Array<OperationSpec & { handler?: ... }>` | All registered entries (spec + handler if present). |
 | `getAllSpecs()` | `() => OperationSpec[]` | All serializable specs. |
-| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<ResponseEnvelope<TOutput>>` | Validate input, run handler, wrap result in `ResponseEnvelope`, warn on output mismatch. Throws if spec or handler not found. |
+| `execute(operationId, input, context)` | `(id: string, input: TInput, ctx: OperationContext) => Promise<ResponseEnvelope<TOutput>>` | Validate input, check access control (skip if `context.trusted`), run handler, wrap result in `ResponseEnvelope`, warn on output mismatch. Throws `CallError` for not found, access denied, validation, or handler errors. |
 
 Registration key format: `{namespace}.{name}`. Overwrite on duplicate.
 
@@ -221,7 +221,7 @@ See [call-protocol.md](call-protocol.md) for full semantics.
 type CallHandler = (event: CallRequestedEvent) => Promise<void>
 ```
 
-Created by `buildCallHandler({ registry, eventTarget? })`. Subscribes to `call.requested`, checks access control, validates input, calls the handler directly (not via `registry.execute()`), applies the shared result pipeline (detect → wrap → normalize → validate), and publishes `call.responded`. On failure: publishes `call.error` with mapped `CallError`. Adapters that return pre-built envelopes (MCP, OpenAPI) pass through via `isResponseEnvelope()` detection. See [response-envelopes.md](response-envelopes.md#shared-result-pipeline) for the shared pipeline definition.
+Created by `buildCallHandler({ registry, eventTarget? })`. Subscribes to `call.requested`, delegates to `registry.execute()` for the full invocation pipeline (lookup, access control, validation, handler, envelope wrapping, normalization), and publishes `call.responded` or `call.error` via the provided `callMap`. Adapters that return pre-built envelopes (MCP, OpenAPI) pass through via `isResponseEnvelope()` detection in `execute()`. See [response-envelopes.md](response-envelopes.md#shared-result-pipeline) for the shared pipeline definition.
 
 ### `CallEventMap`
 
@@ -273,14 +273,10 @@ interface EnvOptions {
   registry: OperationRegistry
   context: OperationContext
   allowedNamespaces?: string[]
-  callMap?: PendingRequestMap
 }
 ```
 
-Creates a namespace-keyed `OperationEnv` for nested operation calls. Each env function returns `Promise<ResponseEnvelope>` — callers access typed data via `envelope.data` or use `unwrap(envelope)`. Two modes:
-
-- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()`, which wraps in `localEnvelope`
-- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, which resolves to `ResponseEnvelope` directly, publishing `call.requested` events with `parentRequestId` for call graph tracking
+Creates a namespace-keyed `OperationEnv` for nested operation calls. Each env function returns `Promise<ResponseEnvelope>` — callers access typed data via `envelope.data` or use `unwrap(envelope)`. Env functions call `registry.execute()` directly with the outer context plus `trusted: true`, which skips redundant access control checks for nested calls.
 
 `SUBSCRIPTION` operations are filtered out — env only provides QUERY and MUTATION operations for nested calls.
 
@@ -373,31 +369,20 @@ See [adapters.md](adapters.md) for detailed adapter documentation.
 
 ## Source vs. Spec Drift
 
-This section documents differences between the architecture spec (this document) and the current source code. Items marked **ADR-005** or **ADR-006** are planned changes not yet implemented.
+This section documents differences between the architecture spec (this document) and the current source code.
 
-### ADR-005 (Response Envelopes) — not yet implemented
+### ADR-005 (Response Envelopes) — ✅ Implemented
 
-| What | Spec says | Source currently does |
-|------|----------|----------------------|
-| `ResponseEnvelope`, `ResponseMeta`, factory functions, `isResponseEnvelope()`, `unwrap()` | Exported from `src/response-envelope.ts` | None of these types or functions exist in source |
-| `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
-| `execute()` result pipeline | Detect → wrap → normalize → validate | Returns raw `result`, validates raw output with `collectErrors` |
-| `OperationEnv` inner function return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
-| `PendingRequestMap.call()` return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
-| `PendingRequestMap.respond()` validation | Enforces `isResponseEnvelope()`, throws on raw values | Accepts `unknown`, no validation |
-| `subscribe()` yield type | `AsyncGenerator<ResponseEnvelope, void, unknown>` | `AsyncGenerator<unknown, void, unknown>` |
-| `CallRespondedEvent.output` | `ResponseEnvelope` | `unknown` |
-| `CallHandler` description | Wraps handler result, applies pipeline, publishes `call.responded` | Discards handler return value; handler publishes `call.responded` itself |
-| `from_mcp` handler | Returns `mcpEnvelope()`, uses `structuredContent`, extracts `outputSchema` | Returns `result.content`, types `outputSchema` as `Type.Unknown()`, throws on `isError` |
-| `from_openapi` handler | Returns `httpEnvelope()` with HTTP metadata | Returns raw response data, throws on HTTP error status |
+All ADR-005 changes have been implemented in source. No remaining drift.
 
-### ADR-006 (Unified Invocation Path) — not yet implemented
+### ADR-006 (Unified Invocation Path) — ✅ Implemented in source
 
-| What | Spec says | Source currently does |
-|------|----------|----------------------|
-| `execute()` access control | Checks `accessControl` when `identity` present | Skips access control entirely |
-| `execute()` on unauthenticated access | Rejects with `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | Always allows |
-| `execute()` error type | Throws `CallError` | Throws plain `Error` |
-| `buildEnv()` | Always uses `execute()`, no `callMap` option | Toggles between `execute()` and `callMap.call()` |
-| `CallHandler` | Thin adapter calling `registry.execute()` | Reimplements lookup, validation, and access control |
-| `OperationContext.trusted` | New field for nested call auth bypass | Does not exist |
+| What | Spec says | Source now does |
+|------|----------|----------------|
+| `execute()` access control | Checks `accessControl` when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — checks access control unless `context.trusted` |
+| `execute()` error type | Throws `CallError` | ✅ `CallError(OPERATION_NOT_FOUND)`, `CallError(ACCESS_DENIED)`, `CallError(VALIDATION_ERROR)` |
+| `buildEnv()` | Always uses `execute()`, no `callMap` option | ✅ `callMap` removed, always calls `registry.execute()` with `trusted: true` |
+| `CallHandler` | Thin adapter calling `registry.execute()` | ✅ Delegates to `registry.execute()`, publishes events |
+| `OperationContext.trusted` | New field for nested call auth bypass | ✅ Added to `OperationContextSchema` and type |
+| `subscribe()` access control | Checks access control when `identity` present | ✅ Implemented — same logic as `execute()` |
+| `checkAccess()` export | Available for external use | ✅ Exported from `call.ts` and `index.ts` |
