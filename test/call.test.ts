@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { PendingRequestMap } from "../src/call.js";
+import { PendingRequestMap, buildCallHandler } from "../src/call.js";
 import { CallError, InfrastructureErrorCode } from "../src/error.js";
+import { OperationRegistry } from "../src/registry.js";
+import { Type } from "@alkdev/typebox";
+import { OperationType } from "../src/types.js";
+import type { Identity } from "../src/types.js";
 
 describe("PendingRequestMap", () => {
   it("creates instance without event target", () => {
@@ -83,5 +87,169 @@ describe("PendingRequestMap", () => {
 
     await callPromise;
     expect(map.getPendingCount()).toBe(0);
+  });
+});
+
+describe("checkAccess resource access control", () => {
+  function makeRegistry(accessControlOverrides: Record<string, unknown> = {}) {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "guarded",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "guarded op",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Object({ ok: Type.Boolean() }),
+      accessControl: {
+        requiredScopes: [],
+        resourceType: "project",
+        resourceAction: "read",
+        ...accessControlOverrides,
+      },
+      handler: async () => ({ ok: true }),
+    });
+    registry.register({
+      name: "open",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "open op",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Object({ ok: Type.Boolean() }),
+      accessControl: {
+        requiredScopes: [],
+      },
+      handler: async () => ({ ok: true }),
+    });
+    return registry;
+  }
+
+  it("denies access when resourceType/resourceAction are set and identity.resources is undefined", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = { id: "user1", scopes: [] };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).rejects.toThrow("Access denied");
+  });
+
+  it("denies access when resourceType/resourceAction are set and identity.resources is empty", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = { id: "user1", scopes: [], resources: {} };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).rejects.toThrow("Access denied");
+  });
+
+  it("denies access when identity.resources has no matching resource type", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = {
+      id: "user1",
+      scopes: [],
+      resources: { "document:abc": ["read"] },
+    };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).rejects.toThrow("Access denied");
+  });
+
+  it("denies access when identity.resources has matching type but wrong action", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = {
+      id: "user1",
+      scopes: [],
+      resources: { "project:abc": ["write"] },
+    };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).rejects.toThrow("Access denied");
+  });
+
+  it("grants access when identity.resources has matching type and action", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = {
+      id: "user1",
+      scopes: [],
+      resources: { "project:abc": ["read"] },
+    };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("grants access when neither resourceType nor resourceAction are set", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = { id: "user1", scopes: [] };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.open",
+        input: {},
+        identity,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("grants access when identity.resources matches and identity has no scopes required", async () => {
+    const registry = makeRegistry();
+    const handler = buildCallHandler({ registry });
+
+    const identity: Identity = {
+      id: "user1",
+      scopes: ["some:scope"],
+      resources: { "project:xyz": ["read", "write"] },
+    };
+
+    await expect(
+      handler({
+        requestId: "r1",
+        operationId: "test.guarded",
+        input: {},
+        identity,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

@@ -245,7 +245,8 @@ function checkAccess(accessControl: AccessControl, identity: Identity): boolean 
     if (!hasAny) return false;
   }
 
-  if (resourceType && resourceAction && identity.resources) {
+  if (resourceType && resourceAction) {
+    if (!identity.resources) return false;
     for (const [key, actions] of Object.entries(identity.resources)) {
       if (key.startsWith(`${resourceType}:`) && actions.includes(resourceAction)) {
         return true;
