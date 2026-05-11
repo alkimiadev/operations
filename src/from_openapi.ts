@@ -1,6 +1,8 @@
 import * as Type from "@alkdev/typebox";
 import { FromSchema } from "./from_schema.js";
 import { OperationType, type OperationSpec, type OperationHandler, type OperationContext } from "./types.js";
+import { CallError } from "./error.js";
+import { httpEnvelope } from "./response-envelope.js";
 
 export interface OpenAPIFS {
   readFile(path: string): Promise<string>;
@@ -265,18 +267,24 @@ function createHTTPOperation(
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      throw new CallError("EXECUTION_ERROR", `HTTP ${response.status}: ${response.statusText}`);
     }
 
     const contentType = response.headers.get("Content-Type") || "";
-    
+    let data: unknown;
     if (contentType.includes("application/json")) {
-      return response.json();
+      data = await response.json();
     } else if (contentType.includes("text/")) {
-      return response.text();
+      data = await response.text();
     } else {
-      return response.arrayBuffer();
+      data = await response.arrayBuffer();
     }
+
+    return httpEnvelope(data, {
+      statusCode: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      contentType,
+    });
   };
 
   return {
