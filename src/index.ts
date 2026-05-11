@@ -16,3 +16,5 @@ export type { CallEventMap, CallEventMapValue, CallRequestedEvent, CallResponded
 export { subscribe } from "./subscribe.js";
 export { createMCPClient, closeMCPClient, MCPClientLoader } from "./from_mcp.js";
 export type { MCPClientConfig, MCPClientWrapper } from "./from_mcp.js";
+export { ResponseEnvelopeSchema, ResponseMetaSchema, RESPONSE_SOURCES, isResponseEnvelope, localEnvelope, httpEnvelope, mcpEnvelope, unwrap } from "./response-envelope.js";
+export type { ResponseEnvelope, ResponseMeta, ResponseSource, LocalResponseMeta, HTTPResponseMeta, MCPResponseMeta, MCPContentBlock, MCPResourceContent, MCPAnnotations } from "./response-envelope.js";
