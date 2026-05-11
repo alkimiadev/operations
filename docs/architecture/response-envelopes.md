@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-10
+last_updated: 2026-05-11
 ---
 
 # Response Envelopes
@@ -221,15 +221,6 @@ Flow:
 
 **Note**: `isResponseEnvelope()` does not validate that the envelope's `source` matches the operation's origin. An MCP handler that explicitly returns a `localEnvelope(...)` passes through as-is. Handlers that explicitly construct envelopes take responsibility for their metadata.
 
-**Current source state** (`src/registry.ts` lines 80-105): `execute()` returns `Promise<TOutput>` directly. It does not wrap results in envelopes, does not call `isResponseEnvelope()`, and validates raw `result` against `outputSchema`. The `Value.Cast()` normalization step is not implemented. Changes needed:
-
-| What | Current source | Target |
-|------|---------------|--------|
-| Return type | `Promise<TOutput>` | `Promise<ResponseEnvelope<TOutput>>` |
-| Wrapping | None — returns raw `result` | `isResponseEnvelope(result) ? result : localEnvelope(result, operationId)` |
-| Validation | `collectErrors(spec.outputSchema, result)` — on raw value | `collectErrors(spec.outputSchema, envelope.data)` — on envelope data |
-| `Value.Cast()` | Not used | If `outputSchema !== Unknown`, `envelope.data = Value.Cast(spec.outputSchema, envelope.data)` |
-
 ### `CallHandler`
 
 Takes full ownership of publishing `call.responded`. Handlers return values; they do NOT publish events.
@@ -246,28 +237,13 @@ Flow:
 9. Publish `call.responded` via `callMap.respond(requestId, envelope)`
 10. On handler exception → publish `call.error` (existing). Note: an envelope with `meta.isError: true` does **not** trigger `call.error`. Only thrown exceptions do.
 
-**Current source state** (`src/call.ts` lines 182-233): `buildCallHandler` calls `handler(input, context)` (line 226) but does not use the return value. The handler is expected to publish `call.responded` itself. Changes needed:
-
-| What | Current source | Target |
-|------|---------------|--------|
-| Handler model | Handler publishes `call.responded` itself; return value ignored | Handler returns value; `CallHandler` wraps and publishes |
-| Return value | `await handler(input, context)` called but result discarded | Result captured, wrapped in envelope if needed, then published |
-| Envelope detection | Not applicable | `isResponseEnvelope(result)` check before wrapping |
-| Result pipeline | None | Detect → wrap → normalize → validate → publish |
-| `call.responded.output` | `Type.Unknown()` | `ResponseEnvelopeSchema` |
-| `PendingRequestMap.respond()` | Accepts any `unknown` value | Must enforce `isResponseEnvelope()` guard |
-
 ### `PendingRequestMap.respond()`
 
 Enforces that `output` is a `ResponseEnvelope` via the `isResponseEnvelope()` type guard (not full schema validation). If called with a non-envelope value, throws. This prevents any code bypassing `CallHandler`'s envelope wrapping. A future iteration may make `respond()` internal (not exported on the public API surface) to further enforce this invariant.
 
-**Current source state** (`src/call.ts` lines 151-156): `respond()` publishes `call.responded` with `output: unknown`. No envelope validation.
-
 ### `PendingRequestMap.call()`
 
 Resolves with the `ResponseEnvelope` from `call.responded.output` instead of raw `unknown`.
-
-**Current source state** (`src/call.ts` lines 120-149): `call()` returns `Promise<unknown>`. The type should become `Promise<ResponseEnvelope>`.
 
 ### `subscribe()`
 
@@ -455,26 +431,24 @@ The following documentation changes have been completed:
 | `api-surface.md` | `CallHandler` | Wraps handler result, publishes `call.responded`. No longer "handler publishes" model. | ✅ |
 | `call-protocol.md` | `PendingRequestMap.respond()` | Now enforces `isResponseEnvelope()` check — throws on raw values. | ✅ |
 | `api-surface.md` | `PendingRequestMap.respond()` | `respond()` now requires `ResponseEnvelope` argument. | ✅ |
-| `adapters.md` | `from_mcp` | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. | ✅ (previous) |
-| `adapters.md` | `from_mcp` | `outputSchema` extracted when available, via `FromSchema`. Falls back to `Type.Unknown()`. | ✅ (previous) |
-| `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. | ✅ (previous) |
+| `adapters.md` | `from_mcp` | Handler returns `mcpEnvelope()`. MCP `isError: true` no longer throws. | ✅ |
+| `adapters.md` | `from_mcp` | `outputSchema` extracted when available, via `FromSchema`. Falls back to `Type.Unknown()`. | ✅ |
+| `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. | ✅ |
 
-The following **code** changes are still needed:
+The following **code** changes have been completed:
 
-| Code | Change |
-|------|--------|
-| `src/registry.ts` | `execute()` returns `Promise<ResponseEnvelope<TOutput>>` |
-| `src/call.ts` | `CallHandler` captures return value, wraps in envelope, publishes `call.responded` |
-| `src/call.ts` | `CallEventSchema` `output` field changes to `ResponseEnvelopeSchema` |
-| `src/call.ts` | `PendingRequestMap.respond()` adds `isResponseEnvelope()` guard |
-| `src/call.ts` | `PendingRequestMap.call()` resolves with `ResponseEnvelope` |
-| `src/subscribe.ts` | `subscribe()` wraps yields in `ResponseEnvelope` |
-| `src/env.ts` | `buildEnv()` functions return `Promise<ResponseEnvelope>` |
-| `src/response-envelope.ts` | New file: types, factory functions, detection, schemas |
-| `src/from_mcp.ts` | Handler returns `mcpEnvelope()`, extracts `outputSchema`, uses `structuredContent` |
-| `src/from_openapi.ts` | Handler returns `httpEnvelope()` |
-
-Additionally, any code subscribing to `"call.responded"` events via the pubsub system (not just `PendingRequestMap`, but any direct pubsub consumer) must expect `ResponseEnvelope` instead of `unknown` in the event payload.
+| Code | Change | Status |
+|------|--------|--------|
+| `src/response-envelope.ts` | New file: types, factory functions, detection, schemas | ✅ |
+| `src/registry.ts` | `execute()` returns `Promise<ResponseEnvelope<TOutput>>` | ✅ |
+| `src/call.ts` | `CallHandler` captures return value, wraps in envelope, publishes `call.responded` | ✅ |
+| `src/call.ts` | `CallEventSchema` `output` field changes to `ResponseEnvelopeSchema` | ✅ |
+| `src/call.ts` | `PendingRequestMap.respond()` adds `isResponseEnvelope()` guard | ✅ |
+| `src/call.ts` | `PendingRequestMap.call()` resolves with `ResponseEnvelope` | ✅ |
+| `src/subscribe.ts` | `subscribe()` wraps yields in `ResponseEnvelope` | ✅ |
+| `src/env.ts` | `buildEnv()` functions return `Promise<ResponseEnvelope>` | ✅ |
+| `src/from_mcp.ts` | Handler returns `mcpEnvelope()`, extracts `outputSchema`, uses `structuredContent` | ✅ |
+| `src/from_openapi.ts` | Handler returns `httpEnvelope()` | ✅ |
 
 ## References
 

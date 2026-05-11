@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-10
+last_updated: 2026-05-11
 ---
 
 # ADR-006: Unified Invocation Path
@@ -31,7 +31,7 @@ Meanwhile `execute()` is a **domain call** — same-process, same-trust, rich ty
 
 ### Prerequisites
 
-This ADR depends on ADR-005 (response envelopes) being implemented in source first. The unified `execute()` requires `ResponseEnvelope` types, `isResponseEnvelope()`, and factory functions that don't exist in source yet.
+This ADR depends on ADR-005 (response envelopes) being implemented in source first. **ADR-005 is now implemented** — `ResponseEnvelope` types, `isResponseEnvelope()`, and factory functions exist in `src/response-envelope.ts`. The prerequisite is met.
 
 ## Decision
 

@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-11
 ---
 
 # Adapters
@@ -79,13 +79,7 @@ Processes all paths in the spec. For each path and method combination:
    - Applies auth headers from config
     - Returns JSON, text, or `ArrayBuffer` based on response content type
 
-**Current source state** (`src/from_openapi.ts`): The handler currently returns raw response data — `response.json()`, `response.text()`, or `response.arrayBuffer()` (lines 273-279). It does NOT wrap the result in `httpEnvelope()`. Error handling throws a plain `Error` (line 268) instead of `CallError`. The response-envelopes spec requires wrapping in `httpEnvelope()` and throwing `CallError` on HTTP errors. The `Value.Cast()` normalization step against `outputSchema` is also not yet implemented. See [response-envelopes.md](response-envelopes.md) for the full specification.
-
-| What | Current source (`src/from_openapi.ts`) | Target (per response-envelopes spec) |
-|------|------------------------------------------|---------------------------------------|
-| Handler return value | Returns raw `response.json()` / `.text()` / `.arrayBuffer()` (lines 273-279) | Returns `httpEnvelope(data, { statusCode, headers, contentType })` |
-| Error handling | Throws `Error(\`HTTP ${status}\`)` (line 268) | Throws `CallError("EXECUTION_ERROR", ...)` |
-| `Value.Cast()` | Not used | If `outputSchema !== Unknown`, cast `Value.Cast(outputSchema, data)` |
+The handler wraps results in `httpEnvelope()` with HTTP metadata (status code, headers, content type). On HTTP error status, it throws `CallError("EXECUTION_ERROR", ...)`. `Value.Cast()` normalization against `outputSchema` is applied by `registry.execute()` and `CallHandler` as part of the shared result pipeline — see [response-envelopes.md](response-envelopes.md#shared-result-pipeline).
 
 ### `FromOpenAPIFile(path, config, fs?)`
 
@@ -179,11 +173,11 @@ async function createMCPClient(
     - `namespace`: the `name` parameter (used as grouping)
     - `type`: `MUTATION` (all MCP tools are mutations)
 ### `FromSchema(tool.inputSchema)` (converts JSON Schema to TypeBox)
-    - `outputSchema`: `tool.outputSchema ? FromSchema(tool.outputSchema) : Type.Unknown()` (MCP spec 2025-06-18+ provides `outputSchema`; older tools lack it)
-    - `handler`: calls `client.callTool({ name, arguments })`, wraps result in `mcpEnvelope()`
-    - `accessControl`: `{ requiredScopes: [] }` (no auth by default)
+     - `outputSchema`: `tool.outputSchema ? FromSchema(tool.outputSchema) : Type.Unknown()` (MCP spec 2025-06-18+ provides `outputSchema`; older tools lack it)
+     - `handler`: calls `client.callTool({ name, arguments })`, wraps result in `mcpEnvelope()`
+     - `accessControl`: `{ requiredScopes: [] }` (no auth by default)
 
-**Current source state** (`src/from_mcp.ts` line 66): `outputSchema: Type.Unknown()` for all tools. The `tool.outputSchema` property is not used. The handler currently throws on `isError` (line 76) and returns `result.content` directly (line 79) instead of wrapping in `mcpEnvelope()`. The `structuredContent` field on `CallToolResult` is not used. See [response-envelopes.md](response-envelopes.md) for the full specification of what needs to change.
+The handler returns pre-built `ResponseEnvelope` instances via `mcpEnvelope()`. `isError: true` results are wrapped in the envelope (not thrown), so consumers check `envelope.meta.isError`. `structuredContent` is preferred as `envelope.data` when available; otherwise `mapMCPContentBlocks(result.content)` is used. `Value.Cast()` normalization against `outputSchema` is applied by `registry.execute()` and `CallHandler` as part of the shared result pipeline.
 
 ### outputSchema and structuredContent
 
@@ -203,17 +197,7 @@ When a tool does NOT declare `outputSchema`:
 
 See [response-envelopes.md](response-envelopes.md) for the full envelope specification and envelope stripping with `Value.Cast()`.
 
-**Implementation changes needed** (tracking spec vs. current source):
-
-| What | Current source (`src/from_mcp.ts`) | Target (per response-envelopes spec) |
-|------|--------------------------------------|---------------------------------------|
-| `outputSchema` at discovery | `Type.Unknown()` for all tools (line 66) | `tool.outputSchema ? FromSchema(tool.outputSchema) : Type.Unknown()` |
-| Handler return value | Returns `result.content` (line 79) | Returns `mcpEnvelope(data, meta)` |
-| `structuredContent` | Not used | Prefer as `data` when present; fall back to `mapMCPContentBlocks(result.content)` |
-| `isError` handling | Throws `Error` (line 76) | Wraps in envelope with `meta.isError: true`, does NOT throw |
-| `Value.Cast()` | Not used | If `structuredContent && outputSchema !== Unknown`, cast `Value.Cast(outputSchema, structuredContent)` |
-
-The `CallToolResult` type in the installed SDK (`@modelcontextprotocol/sdk` DRAFT-2026-v1) already includes `structuredContent?: { [key: string]: unknown }` and the `Tool` type already includes `outputSchema?`. No SDK upgrade needed — only the adapter code needs updating.
+The `CallToolResult` type in the installed SDK (`@modelcontextprotocol/sdk` DRAFT-2026-v1) includes `structuredContent?: { [key: string]: unknown }` and the `Tool` type includes `outputSchema?`. The adapter code extracts `outputSchema` at discovery time and uses `structuredContent` at call time.
 
 ### `MCPClientConfig`
 

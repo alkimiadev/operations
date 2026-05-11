@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-10
+last_updated: 2026-05-11
 ---
 
 # API Surface
@@ -373,23 +373,7 @@ See [adapters.md](adapters.md) for detailed adapter documentation.
 
 ## Source vs. Spec Drift
 
-This section documents differences between the architecture spec (this document) and the current source code. Items marked **ADR-005** or **ADR-006** are planned changes not yet implemented.
-
-### ADR-005 (Response Envelopes) — not yet implemented
-
-| What | Spec says | Source currently does |
-|------|----------|----------------------|
-| `ResponseEnvelope`, `ResponseMeta`, factory functions, `isResponseEnvelope()`, `unwrap()` | Exported from `src/response-envelope.ts` | None of these types or functions exist in source |
-| `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
-| `execute()` result pipeline | Detect → wrap → normalize → validate | Returns raw `result`, validates raw output with `collectErrors` |
-| `OperationEnv` inner function return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
-| `PendingRequestMap.call()` return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
-| `PendingRequestMap.respond()` validation | Enforces `isResponseEnvelope()`, throws on raw values | Accepts `unknown`, no validation |
-| `subscribe()` yield type | `AsyncGenerator<ResponseEnvelope, void, unknown>` | `AsyncGenerator<unknown, void, unknown>` |
-| `CallRespondedEvent.output` | `ResponseEnvelope` | `unknown` |
-| `CallHandler` description | Wraps handler result, applies pipeline, publishes `call.responded` | Discards handler return value; handler publishes `call.responded` itself |
-| `from_mcp` handler | Returns `mcpEnvelope()`, uses `structuredContent`, extracts `outputSchema` | Returns `result.content`, types `outputSchema` as `Type.Unknown()`, throws on `isError` |
-| `from_openapi` handler | Returns `httpEnvelope()` with HTTP metadata | Returns raw response data, throws on HTTP error status |
+This section documents differences between the architecture spec and the current source code. ADR-005 (Response Envelopes) has been fully implemented — all envelope types, factories, detection, and integration points are in source and match the spec. ADR-006 (Unified Invocation Path) is not yet implemented.
 
 ### ADR-006 (Unified Invocation Path) — not yet implemented
 

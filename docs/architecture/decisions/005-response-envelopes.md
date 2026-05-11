@@ -1,6 +1,6 @@
 # ADR-005: Response Envelopes for Transport-Aware Results
 
-**Status**: Draft
+**Status**: Implemented
 **Date**: 2026-05-10
 
 ## Context

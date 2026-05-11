@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-11
 ---
 
 # @alkdev/operations Architecture
@@ -74,6 +74,7 @@ Spokes will import `@alkdev/operation` for operation definitions and `@alkdev/pu
 |----------|---------|
 | [api-surface.md](api-surface.md) | All public types, registry, call protocol, subscribe, env, adapters |
 | [call-protocol.md](call-protocol.md) | PendingRequestMap, CallHandler, call≡subscribe, events, error model, access control |
+| [response-envelopes.md](response-envelopes.md) | Response envelope types, factory functions, detection, schemas, integration points |
 | [adapters.md](adapters.md) | from_schema, from_openapi, from_mcp, scanner — how they work, how to add new adapters |
 | [build-distribution.md](build-distribution.md) | Dependencies, project structure, sub-path exports, peer deps, build tooling |
 

@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-10
+last_updated: 2026-05-11
 ---
 
 # Call Protocol
@@ -159,7 +159,7 @@ function buildCallHandler(config: CallHandlerConfig): CallHandler
 
 interface CallHandlerConfig {
   registry: OperationRegistry
-  eventTarget?: EventTarget
+  callMap?: PendingRequestMap
 }
 
 type CallHandler = (event: CallRequestedEvent) => Promise<void>
@@ -309,20 +309,7 @@ This allows spec-only registration for scenarios where handlers are provided sep
 
 ## Source vs. Spec Drift
 
-This section documents differences between the architecture spec (this document) and the current source code. Items are planned changes not yet implemented.
-
-### ADR-005 (Response Envelopes) — not yet implemented
-
-| What | Spec says | Source currently does |
-|------|----------|----------------------|
-| `CallEventSchema["call.responded"].output` | `ResponseEnvelopeSchema` | `Type.Unknown()` |
-| `CallHandler` behavior | Wraps handler return value, publishes `call.responded` | Discards handler return value; handler must publish itself |
-| `CallHandler` error handling | Publishes `call.error` via pubsub | Re-throws `CallError` (does not publish) |
-| `call()` return type | `Promise<ResponseEnvelope>` | `Promise<unknown>` |
-| `call()` resolution | Resolves with `ResponseEnvelope` from `output` field | Resolves with raw `unknown` from `output` |
-| `respond()` validation | Enforces `isResponseEnvelope()` guard, throws on raw values | Accepts `unknown`, no validation |
-| `subscribe()` yield type | `AsyncGenerator<ResponseEnvelope, void, unknown>`, wraps yields | `AsyncGenerator<unknown, void, unknown>`, yields raw values |
-| `buildEnv()` return types | `Promise<ResponseEnvelope>` per function | `Promise<unknown>` per function |
+This section documents differences between the architecture spec (this document) and the current source code. ADR-005 (Response Envelopes) has been fully implemented — `CallEventSchema["call.responded"].output` uses `ResponseEnvelopeSchema`, `CallHandler` wraps handler return values and publishes `call.responded`, `call()` returns `Promise<ResponseEnvelope>`, `respond()` enforces `isResponseEnvelope()`, `subscribe()` yields `ResponseEnvelope`, and `buildEnv()` returns `Promise<ResponseEnvelope>` per function. ADR-006 (Unified Invocation Path) is not yet implemented.
 
 ### ADR-006 (Unified Invocation Path) — not yet implemented
 
@@ -333,7 +320,6 @@ This section documents differences between the architecture spec (this document)
 | `CallHandler` calls `execute()` | Thin adapter that calls `registry.execute()` internally | Reimplements lookup, validation, and access control independently |
 | `buildEnv()` | Always uses `execute()`, no `callMap` option | Toggles between `execute()` and `callMap.call()` via `if (callMap)` |
 | `OperationContext.trusted` | New field for nested call bypass | Does not exist |
-| `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
 | `execute()` error type | Throws `CallError` | Throws plain `Error` |
 
 ## References

@@ -1,6 +1,6 @@
 ---
 status: draft
-last_updated: 2026-05-09
+last_updated: 2026-05-11
 ---
 
 # Build & Distribution
@@ -43,6 +43,7 @@ Dependencies, project structure, sub-path exports, peer deps, and build tooling.
     types.ts            # Core types: IOperationDefinition, OperationSpec, OperationType, etc.
     registry.ts         # OperationRegistry: registerSpec, registerHandler, execute, get, list
     validation.ts       # assertIsSchema, validateOrThrow, collectErrors, formatValueErrors
+    response-envelope.ts # ResponseEnvelope types, factories, detection, schemas, unwrap
     call.ts             # PendingRequestMap, buildCallHandler, CallEventMap, event types
     subscribe.ts        # subscribe(): direct AsyncGenerator execution
     env.ts              # buildEnv(): namespace-keyed env with direct/call-protocol modes

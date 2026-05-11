@@ -7,6 +7,7 @@
 | [architecture/README.md](architecture/README.md) | Overview, why this exists, what it provides, consumer context, threat model |
 | [architecture/api-surface.md](architecture/api-surface.md) | All public types, registry API, call protocol API, subscribe, env, adapters |
 | [architecture/call-protocol.md](architecture/call-protocol.md) | PendingRequestMap, CallHandler, call≡subscribe semantics, events, error model, access control |
+| [architecture/response-envelopes.md](architecture/response-envelopes.md) | Response envelope types, factory functions, detection, schemas, integration points |
 | [architecture/adapters.md](architecture/adapters.md) | from_schema, from_openapi, from_mcp, scanner — how they work, how to add new adapters |
 | [architecture/build-distribution.md](architecture/build-distribution.md) | Dependencies, project structure, sub-path exports, peer deps, build tooling |
 
@@ -18,3 +19,5 @@
 | [002](architecture/decisions/002-fs-injection.md) | Inject filesystem dependencies for runtime agnosticism |
 | [003](architecture/decisions/003-peer-dep-adapters.md) | Peer dependencies for adapter isolation (MCP SDK, @std/path) |
 | [004](architecture/decisions/004-schema-const-naming.md) | Schema const naming convention (AccessControlSchema + AccessControl type) |
+| [005](architecture/decisions/005-response-envelopes.md) | Response Envelopes for transport-aware results |
+| [006](architecture/decisions/006-unified-invocation-path.md) | Unified Invocation Path (execute as single entry point) |
