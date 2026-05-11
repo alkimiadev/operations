@@ -309,7 +309,7 @@ This allows spec-only registration for scenarios where handlers are provided sep
 
 ## Source vs. Spec Drift
 
-This section documents differences between the architecture spec (this document) and the current source code. Items marked **ADR-005** or **ADR-006** are planned changes not yet implemented. Items marked **Bug** are unintentional discrepancies.
+This section documents differences between the architecture spec (this document) and the current source code. Items are planned changes not yet implemented.
 
 ### ADR-005 (Response Envelopes) — not yet implemented
 
@@ -335,13 +335,6 @@ This section documents differences between the architecture spec (this document)
 | `OperationContext.trusted` | New field for nested call bypass | Does not exist |
 | `execute()` return type | `Promise<ResponseEnvelope<TOutput>>` | `Promise<TOutput>` |
 | `execute()` error type | Throws `CallError` | Throws plain `Error` |
-
-### Bugs
-
-| What | Description |
-|------|-------------|
-| `checkAccess()` resource check bypass | When `identity.resources` is `undefined` (falsy), the resource access check at `call.ts:248` (`if (resourceType && resourceAction && identity.resources)`) evaluates to `false` and falls through to `return true` — granting access even though `resourceType`/`resourceAction` are declared on the operation. This means an identity without any declared resources passes resource-level access control for operations that require it. ADR-006's default-deny rule (`ACCESS_DENIED` when required scopes/resources are missing) would fix this. |
-| `PendingRequestMap` type name conflict | `src/env.ts` exports a `PendingRequestMap` **interface** (reduced signature: missing `deadline`, `identity` typed as `unknown`). `src/call.ts` exports the **class** `PendingRequestMap` which has the full signature. `src/index.ts` re-exports the interface as `PendingRequestMap` and the class as `PendingRequestMapClass`. This naming creates confusion — the documented `PendingRequestMap` refers to the class, but importing the type gives the reduced interface. |
 
 ## References
 
