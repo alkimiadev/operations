@@ -1,12 +1,13 @@
 import { OperationType } from "./types.js";
 import type { OperationContext, OperationEnv, Identity } from "./types.js";
 import type { OperationRegistry } from "./registry.js";
+import type { ResponseEnvelope } from "./response-envelope.js";
 import { getLogger } from "@logtape/logtape";
 
 const logger = getLogger("operations:env");
 
 export interface CallMap {
-  call(operationId: string, input: unknown, options?: { parentRequestId?: string; deadline?: number; identity?: Identity }): Promise<unknown>;
+  call(operationId: string, input: unknown, options?: { parentRequestId?: string; deadline?: number; identity?: Identity }): Promise<ResponseEnvelope>;
 }
 
 export interface EnvOptions {

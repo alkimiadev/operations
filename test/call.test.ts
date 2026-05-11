@@ -31,6 +31,7 @@ describe("PendingRequestMap", () => {
     }, 10);
 
     const result = await callPromise;
+    expect(isResponseEnvelope(result)).toBe(true);
     expect(result.meta.source).toBe("local");
     expect(result.data).toEqual({ result: "world" });
   });
@@ -57,6 +58,11 @@ describe("PendingRequestMap", () => {
     if (result.meta.source === "http") {
       expect(result.meta.statusCode).toBe(200);
     }
+  });
+
+  it("respond() throws when called with non-envelope value", () => {
+    const map = new PendingRequestMap();
+    expect(() => map.respond("req-1", { result: "world" } as any)).toThrow("ResponseEnvelope");
   });
 
   it("call() rejects when emitError() is called", async () => {
