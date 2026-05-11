@@ -1,19 +1,19 @@
 import { OperationType } from "./types.js";
-import type { OperationContext, OperationEnv } from "./types.js";
+import type { OperationContext, OperationEnv, Identity } from "./types.js";
 import type { OperationRegistry } from "./registry.js";
 import { getLogger } from "@logtape/logtape";
 
 const logger = getLogger("operations:env");
 
-export interface PendingRequestMap {
-  call(operationId: string, input: unknown, options?: { parentRequestId?: string; identity?: unknown }): Promise<unknown>;
+export interface CallMap {
+  call(operationId: string, input: unknown, options?: { parentRequestId?: string; deadline?: number; identity?: Identity }): Promise<unknown>;
 }
 
 export interface EnvOptions {
   registry: OperationRegistry;
   context: OperationContext;
   allowedNamespaces?: string[];
-  callMap?: PendingRequestMap;
+  callMap?: CallMap;
 }
 
 export function buildEnv(options: EnvOptions): OperationEnv {
