@@ -149,11 +149,17 @@ When task becomes untendable:
 ### Process
 
 1. **Stop** - don't force through
-2. **Notify coordinator**:
+2. **Notify coordinator** with a detailed blocking message. Include:
+   - What you were trying to do
+   - What went wrong (specific error, missing dep, ambiguous spec, etc.)
+   - What you've already tried
+   - What you think would resolve it (if you know)
    ```text
-   worktree({action: "notify", args: {message: "Blocked on <task-id>: <reason>", level: "blocking"}})
+   worktree({action: "notify", args: {message: "Blocked on <task-id>: <detailed explanation including what was attempted, what failed, and suggested resolution>", level: "blocking"}})
    ```
-3. **Exit** - coordinator handles escalation
+3. **Commit any partial source code progress** if it's coherent (you may not have any — that's fine)
+4. **Push your branch** so the coordinator can inspect your work if needed
+5. **Exit** - coordinator handles escalation
 
 ### Wrong Directory Recovery
 

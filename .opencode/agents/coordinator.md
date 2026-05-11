@@ -70,11 +70,10 @@ This is the most critical coordinator responsibility. Follow it exactly:
    git merge feat/<task-name> --no-edit
    ```
 
-   If merge conflicts occur:
-   - **Source code conflicts between parallel tasks** that modify the same file: Resolve them yourself. Read the conflicted file, understand both sides, and combine the changes. Both sets of changes are valid — they were just developed in parallel.
-   - **Task file conflicts** (`tasks/*.md`): These happen when multiple agents commit task files. Remove the conflicting task files before merging (`rm -rf tasks/`), merge, then restore from backup. Or use `git checkout --theirs tasks/` to accept the incoming versions.
-   - **Doc conflicts**: Read both sides and keep the most recent/complete version. Often one branch cleaned up drift tables while another updated status.
-   - **If truly unresolvable**: Message the original agent's session for guidance, or ask the user.
+    If merge conflicts occur:
+    - **Source code conflicts between parallel tasks** that modify the same file: Resolve them yourself. Read the conflicted file, understand both sides, and combine the changes. Both sets of changes are valid — they were just developed in parallel.
+    - **Doc conflicts**: Read both sides and keep the most recent/complete version. Often one branch cleaned up drift tables while another updated status.
+    - **If truly unresolvable**: Message the original agent's session for guidance, or ask the user.
 
 3. **Validate after every merge:**
    ```bash
@@ -109,6 +108,38 @@ When multiple tasks complete around the same time, merge them **one at a time** 
 2. Tasks that share source files last (so you can resolve conflicts against the latest main)
 
 If two tasks modify the same source files and were developed in parallel, you WILL get merge conflicts. This is expected — resolve them.
+
+### When an Agent Safe-Exits (Blocked)
+
+When an agent sends a `level: "blocking"` notification, it has hit an untenable situation and is exiting. This is the Safe Exit protocol — it's important, don't ignore it.
+
+1. **Read the blocking message carefully.** The agent should have included what it was trying to do, what went wrong, what it tried, and suggested resolution.
+
+2. **Get more context if needed:**
+   ```text
+   memory({tool: "messages", args: {sessionId: "ses_", role: "assistant"}})
+   ```
+   Read the agent's session to understand what actually happened.
+
+3. **Update the task file on main:**
+   ```bash
+   # Edit tasks/<task-id>.md
+   # status: blocked
+   # ## Notes
+   # Blocked: <reason from agent's message>
+   git add tasks/<task-id>.md
+   git commit -m "blocked(<task-id>): <reason>"
+   git push origin main
+   ```
+
+4. **Try to resolve the blocker:**
+   - Missing context? Send it via `worktree({action: "message", ...})` — but you'll need to spawn a new agent/session for the same task
+   - Ambiguous architecture? Ask the user to clarify
+   - Scope too large? Decompose into smaller tasks
+   - External dependency (tool bug, env issue)? Escalate to user
+
+5. **If you can resolve it:** Spawn a new agent for the same task with the additional context or adjusted scope.
+   **If you can't:** Move on to other independent work and flag the blocked task for later resolution.
 
 ## Spawning Agents
 
@@ -238,18 +269,18 @@ When multiple agents commit task files in parallel branches, merging causes conf
 
 ### Coordinator Responsibilities
 
-After merging a task's source code changes into main, update the task file:
+After a task completes and is merged, update the task file on main:
 1. Find the task file in `tasks/`
-2. Update frontmatter `status: completed` (or `blocked` / `failed`)
+2. Update frontmatter `status: completed` (or `blocked` if the agent safe-exited)
 3. Add a brief summary to the `## Summary` section (from the agent's completion notification)
 4. Commit on main: `git commit -m "chore: update task <id> status to completed"`
+5. Push main
 
 ### If an Agent Accidentally Commits a Task File
 
-If `git merge` complains about conflicting task files:
-- Don't spend time resolving them — it's just metadata
-- Use `git checkout --theirs tasks/` to accept the incoming version, or temporarily remove `tasks/` before merging
-- After merge, update the task files on main with correct status
+If `git merge` complains about conflicting task files (this shouldn't happen with the new convention, but just in case):
+- Use `git checkout --theirs tasks/<file>.md` to accept the incoming version, or remove the local copy before merging
+- After merge, update the task file on main with the correct status
 
 ## Context Management
 
