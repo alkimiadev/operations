@@ -113,39 +113,20 @@ git diff --stat
 
 Check each acceptance criterion in the task file.
 
-### 5. Update Task
-
-Edit the task file:
-
-```yaml
----
-status: completed  # or blocked, failed
----
-```
-
-Fill summary:
-
-```markdown
-## Summary
-
-Implemented <brief description>.
-- Created: <files>
-- Modified: <files>
-- Tests: <count>, all passing
-```
-
-### 6. Commit and Notify
+### 5. Commit and Notify
 
 ```bash
-# Stage and commit from worktree
-git add .
+# Stage only source code — NOT task files
+git add src/ test/ docs/  # or specific files as appropriate
 git commit -m "feat(<task-id>): <description>"
 git push origin $(git branch --show-current)
 ```
 
+**Do NOT commit task files** (`tasks/*.md`). Task files are coordination state managed by the coordinator on main. Committing them in your feature branch causes merge conflicts when multiple tasks run in parallel. Include your completion summary in the notify message instead.
+
 ```text
 # Notify coordinator of completion
-worktree({action: "notify", args: {message: "Task completed: <task-id>", level: "info"}})
+worktree({action: "notify", args: {message: "Task completed: <task-id>. <brief summary of what was done, files changed, test count>", level: "info"}})
 ```
 
 **Critical**: Push immediately so coordinator sees progress.
@@ -168,27 +149,11 @@ When task becomes untendable:
 ### Process
 
 1. **Stop** - don't force through
-2. **Update task**:
-   ```yaml
-   status: blocked
-   ```
-3. **Document in Notes**:
-   ```markdown
-   ## Notes
-   
-   Blocked: <clear explanation>
-   ```
-4. **Commit the task file** (so coordinator sees status):
-   ```bash
-   git add tasks/<task-id>.md
-   git commit -m "blocked(<task-id>): <reason>"
-   git push origin $(git branch --show-current)
-   ```
-5. **Notify coordinator**:
+2. **Notify coordinator**:
    ```text
    worktree({action: "notify", args: {message: "Blocked on <task-id>: <reason>", level: "blocking"}})
    ```
-6. **Exit** - coordinator handles escalation
+3. **Exit** - coordinator handles escalation
 
 ### Wrong Directory Recovery
 

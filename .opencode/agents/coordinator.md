@@ -134,8 +134,9 @@ Your task: {{task}}
 3. Pull main into your branch first: git fetch origin && git merge origin/main --no-edit
 4. Implement the changes, following all acceptance criteria.
 5. Run npm run build, npm run lint, npm test. Fix any failures.
-6. Commit your changes.
-7. Notify: worktree({action: "notify", args: {message: "Task completed: {{task}}", level: "info"}})
+6. Commit ONLY source code — do not commit task files (tasks/*.md). The coordinator manages task status on main.
+7. Push: git push origin $(git branch --show-current)
+8. Notify: worktree({action: "notify", args: {message: "Task completed: {{task}}. <brief summary>", level: "info"}})
 
 Key project constraints:
 - [project-specific constraints from AGENTS.md or README]
@@ -229,12 +230,26 @@ Only spawn a review task as an agent if the review requires extensive manual ins
 
 ## Task File Handling
 
-Task files (`tasks/*.md`) live in the repository. Agents may commit their task file with status updates and notes. This can cause merge conflicts when multiple agents commit task files in parallel.
+Task files (`tasks/*.md`) are coordination state. They live in the repo for discoverability and historical record, but **agents do not commit them** — only the coordinator updates task files on main.
 
-Handling strategies:
-- Before merging, if `git merge` complains about untracked task files conflicting, temporarily remove the local `tasks/` directory, merge, then restore from backup
-- When resolving task file conflicts, prefer the incoming (feature branch) version — it has the agent's status update
-- The `tasks/` directory is coordination state — it's expected to be messy during active coordination
+### Why Agents Don't Commit Task Files
+
+When multiple agents commit task files in parallel branches, merging causes conflicts on files that are essentially metadata. Eliminating task file commits from feature branches removes the highest-frequency, lowest-value conflict category.
+
+### Coordinator Responsibilities
+
+After merging a task's source code changes into main, update the task file:
+1. Find the task file in `tasks/`
+2. Update frontmatter `status: completed` (or `blocked` / `failed`)
+3. Add a brief summary to the `## Summary` section (from the agent's completion notification)
+4. Commit on main: `git commit -m "chore: update task <id> status to completed"`
+
+### If an Agent Accidentally Commits a Task File
+
+If `git merge` complains about conflicting task files:
+- Don't spend time resolving them — it's just metadata
+- Use `git checkout --theirs tasks/` to accept the incoming version, or temporarily remove `tasks/` before merging
+- After merge, update the task files on main with correct status
 
 ## Context Management
 
