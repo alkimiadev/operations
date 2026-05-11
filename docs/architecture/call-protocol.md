@@ -152,7 +152,7 @@ Looks up the `PendingRequest`, clears its timer, publishes `call.aborted`, rejec
 
 ## CallHandler
 
-`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()`. It takes full ownership of publishing `call.responded` — handlers return values; they do NOT publish events.
+`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()`. It delegates to `execute()` for the full invocation pipeline (lookup, access control, validation, handler, envelope wrapping, normalization, output validation), taking full ownership of publishing `call.responded`.
 
 ```ts
 function buildCallHandler(config: CallHandlerConfig): CallHandler
@@ -167,19 +167,10 @@ type CallHandler = (event: CallRequestedEvent) => Promise<void>
 
 ### Handler Flow
 
-1. Look up spec by `operationId` from the registry via `getSpec()`
-2. If not found, throw `CallError(OPERATION_NOT_FOUND, ...)`
-3. Look up handler by `operationId` via `getHandler()`
-4. If not found, throw `CallError(OPERATION_NOT_FOUND, "No handler registered for operation: ...")`
-5. Check access control (see below)
-6. Validate input with `validateOrThrow`
-7. Execute operation handler
-8. On success: apply the shared result pipeline (see [Response Envelopes → Shared Result Pipeline](response-envelopes.md#shared-result-pipeline)):
-   - Detect: `isResponseEnvelope(result)` → pass through, otherwise `localEnvelope(result, operationId)`
-   - Normalize: `Value.Cast(spec.outputSchema, envelope.data)` when `outputSchema` is not `Type.Unknown()`
-   - Validate: `collectErrors(spec.outputSchema, envelope.data)` — warning-only
-   - Publish `call.responded` via `callMap.respond(requestId, envelope)`
-9. On failure: `mapError` converts the thrown value to `CallError`, publish `call.error`
+1. Construct `OperationContext` from the event (`requestId`, `parentRequestId`, `identity` — `trusted` is NOT set, remote calls always run access control)
+2. Call `registry.execute(operationId, input, context)` — this performs all validation, access control, and result pipeline
+3. On success: publish `call.responded` via `callMap.respond(requestId, envelope)`
+4. On failure: `mapError` converts the thrown value to `CallError`, publish `call.error`
 
 **Key change**: In the pre-envelope model, handlers were responsible for publishing `call.responded` themselves (the handler return value was discarded). In the envelope model, `CallHandler` owns wrapping and publishing. Handler return values are captured and wrapped. This ensures every response goes through the envelope pipeline — no raw values can bypass it.
 
@@ -191,20 +182,25 @@ For MCP results with `meta.isError: true`, the handler still returns an envelope
 
 ## Access Control
 
-### Enforcement Point
+### Enforcement Points
 
-`CallHandler` enforces `AccessControl` before calling the handler directly. Direct `registry.execute()` calls bypass access control — this is by design for trusted internal calls.
+Access control is enforced in two places:
+
+1. **`registry.execute()`** — Checks `accessControl` on every invocation. Skips access control when `context.trusted === true` (nested calls from `buildEnv()`). When `requiredScopes` is non-empty and no `identity` is present, rejects with `ACCESS_DENIED`.
+
+2. **`subscribe()`** — Checks `accessControl` when called. Skips access control when `context.trusted === true`. Same default-deny logic as `execute()`.
+
+3. **`CallHandler`** — Delegates to `registry.execute()`, which performs access control. `CallHandler` does NOT set `trusted` on the context — remote calls always run access control because trust does not cross process boundaries.
 
 ### Flow
 
 ```
-call.requested event arrives with Identity
-  → Look up operation's AccessControl
-  → Check requiredScopes (caller has ALL?)
-  → Check requiredScopesAny (caller has ANY?)
-  → Check resourceType/resourceAction against identity.resources
-  → All pass → proceed to execute
-  → Any fail → throw CallError(ACCESS_DENIED, ...)
+invoke execute(operationId, input, context)
+  → if context.trusted → skip access control
+  → if requiredScopes/requiredScopesAny/resourceType non-empty and no identity → ACCESS_DENIED
+  → else check identity against accessControl
+    → all pass → proceed to execute
+    → any fail → ACCESS_DENIED
 ```
 
 ### `checkAccess` Implementation
@@ -264,8 +260,7 @@ Operations declare their possible errors via `errorSchemas` on `IOperationDefini
 
 Routing is an env construction concern, not a separate protocol layer. `buildEnv` creates the `OperationEnv`:
 
-- **Direct mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()` directly, returning `Promise<ResponseEnvelope>`
-- **Call protocol mode**: `buildEnv({ registry, context, callMap })` — env functions call `callMap.call()`, which resolves to `Promise<ResponseEnvelope>`, publishing `call.requested` events with `parentRequestId` propagation
+- **Unified mode**: `buildEnv({ registry, context })` — env functions call `registry.execute()` directly, returning `Promise<ResponseEnvelope>`. The context is propagated with `trusted: true` so nested calls skip redundant access control checks.
 
 `parentRequestId` enables call graph reconstruction and abort cascading — every nested call includes it.
 
@@ -294,7 +289,7 @@ async function* subscribe(
 ): AsyncGenerator<ResponseEnvelope, void, unknown>
 ```
 
-Gets the operation from the registry, casts its handler to `AsyncGenerator`, and yields each value wrapped in `ResponseEnvelope`. If a yielded value `isResponseEnvelope()`, it passes through (e.g., for adapter handlers). Otherwise, `localEnvelope(value, operationId)` wraps it with a fresh `timestamp` per yield. Properly cleans up with `generator.return()` in a `finally` block.
+Gets the operation spec and checks access control (same default-deny logic as `execute()` — rejects with `ACCESS_DENIED` when `requiredScopes` is non-empty and no `identity` is present; skips check when `context.trusted`). Then casts the handler to `AsyncGenerator` and yields each value wrapped in `ResponseEnvelope`. If a yielded value `isResponseEnvelope()`, it passes through (e.g., for adapter handlers). Otherwise, `localEnvelope(value, operationId)` wraps it with a fresh `timestamp` per yield. Properly cleans up with `generator.return()` in a `finally` block.
 
 Use `subscribe()` for in-process consumption. Use `PendingRequestMap.call()` for cross-transport invocation that resolves after one event. For cross-transport streaming, use `PendingRequestMap.subscribe()` to yield multiple events.
 
@@ -309,18 +304,22 @@ This allows spec-only registration for scenarios where handlers are provided sep
 
 ## Source vs. Spec Drift
 
-This section documents differences between the architecture spec (this document) and the current source code. ADR-005 (Response Envelopes) has been fully implemented — `CallEventSchema["call.responded"].output` uses `ResponseEnvelopeSchema`, `CallHandler` wraps handler return values and publishes `call.responded`, `call()` returns `Promise<ResponseEnvelope>`, `respond()` enforces `isResponseEnvelope()`, `subscribe()` yields `ResponseEnvelope`, and `buildEnv()` returns `Promise<ResponseEnvelope>` per function. ADR-006 (Unified Invocation Path) is not yet implemented.
+This section documents differences between the architecture spec (this document) and the current source code.
 
-### ADR-006 (Unified Invocation Path) — not yet implemented
+### ADR-005 (Response Envelopes) — ✅ Implemented
 
-| What | Spec says | Source currently does |
-|------|----------|----------------------|
-| `execute()` access control | Checks `accessControl` when `identity` present | Skips access control entirely |
-| `execute()` unauthenticated calls | Rejects with `ACCESS_DENIED` when `requiredScopes` non-empty and `identity` absent | Always allows (no access check) |
-| `CallHandler` calls `execute()` | Thin adapter that calls `registry.execute()` internally | Reimplements lookup, validation, and access control independently |
-| `buildEnv()` | Always uses `execute()`, no `callMap` option | Toggles between `execute()` and `callMap.call()` via `if (callMap)` |
-| `OperationContext.trusted` | New field for nested call bypass | Does not exist |
-| `execute()` error type | Throws `CallError` | Throws plain `Error` |
+All ADR-005 changes have been implemented in source. No remaining drift.
+
+### ADR-006 (Unified Invocation Path) — ✅ Implemented in source
+
+| What | Spec says | Source now does |
+|------|----------|----------------|
+| `execute()` access control | Checks `accessControl` when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — checks access control unless `context.trusted` |
+| `CallHandler` calls `execute()` | Thin adapter that calls `registry.execute()` internally | ✅ Delegates to `registry.execute()`, publishes events |
+| `buildEnv()` | Always uses `execute()`, no `callMap` option | ✅ `callMap` removed, always calls `registry.execute()` with `trusted: true` |
+| `OperationContext.trusted` | New field for nested call bypass | ✅ Added to `OperationContextSchema` and type |
+| `execute()` error type | Throws `CallError` | ✅ `CallError(OPERATION_NOT_FOUND)`, `CallError(ACCESS_DENIED)`, `CallError(VALIDATION_ERROR)` |
+| `subscribe()` access control | Checks access control when `identity` present; `ACCESS_DENIED` when `requiredScopes` non-empty and no `identity` | ✅ Implemented — same logic as `execute()` |
 
 ## References
 

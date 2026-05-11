@@ -251,14 +251,14 @@ describe("CallHandler", () => {
     return registry;
   }
 
-  it("wraps handler return value in localEnvelope", async () => {
+  it("wraps handler return value in localEnvelope and publishes call.responded", async () => {
     const registry = makeRegistry();
     const callMap = new PendingRequestMap();
     const handler = buildCallHandler({ registry, callMap });
 
     const callPromise = callMap.call("test.echo", { value: "hello" });
 
-    handler({
+    await handler({
       requestId: [...callMap["requests"].keys()][0],
       operationId: "test.echo",
       input: { value: "hello" },
@@ -273,14 +273,14 @@ describe("CallHandler", () => {
     expect(result.data).toEqual({ value: "hello" });
   });
 
-  it("wraps undefined handler return value in localEnvelope", async () => {
+  it("wraps undefined handler return value and publishes call.responded", async () => {
     const registry = makeRegistry();
     const callMap = new PendingRequestMap();
     const handler = buildCallHandler({ registry, callMap });
 
     const callPromise = callMap.call("test.voidOp", {});
 
-    handler({
+    await handler({
       requestId: [...callMap["requests"].keys()][0],
       operationId: "test.voidOp",
       input: {},
@@ -318,7 +318,7 @@ describe("CallHandler", () => {
 
     const callPromise = callMap.call("test.mcpOp", {});
 
-    handler({
+    await handler({
       requestId: [...callMap["requests"].keys()][0],
       operationId: "test.mcpOp",
       input: {},
@@ -353,7 +353,7 @@ describe("CallHandler", () => {
 
     const callPromise = callMap.call("test.httpOp", {});
 
-    handler({
+    await handler({
       requestId: [...callMap["requests"].keys()][0],
       operationId: "test.httpOp",
       input: {},
@@ -430,64 +430,6 @@ describe("CallHandler", () => {
       expect((error as CallError).code).toBe("CUSTOM_CODE");
       expect((error as CallError).message).toBe("custom error message");
     }
-  });
-
-  it("applies Value.Cast normalization when outputSchema is not Unknown", async () => {
-    const registry = new OperationRegistry();
-    registry.register({
-      name: "defaultsFields",
-      namespace: "test",
-      version: "1.0.0",
-      type: OperationType.QUERY,
-      description: "op with default fields",
-      inputSchema: Type.Object({}),
-      outputSchema: Type.Object({ name: Type.String(), count: Type.Number({ default: 0 }) }),
-      accessControl: { requiredScopes: [] },
-      handler: async () => ({ name: "test" }),
-    });
-
-    const callMap = new PendingRequestMap();
-    const handler = buildCallHandler({ registry, callMap });
-
-    const callPromise = callMap.call("test.defaultsFields", {});
-
-    handler({
-      requestId: [...callMap["requests"].keys()][0],
-      operationId: "test.defaultsFields",
-      input: {},
-    });
-
-    const result = await callPromise;
-    expect(result.data).toEqual({ name: "test", count: 0 });
-  });
-
-  it("does not normalize with Value.Cast when outputSchema is Unknown", async () => {
-    const registry = new OperationRegistry();
-    registry.register({
-      name: "unknownOutput",
-      namespace: "test",
-      version: "1.0.0",
-      type: OperationType.QUERY,
-      description: "op with unknown output",
-      inputSchema: Type.Object({}),
-      outputSchema: Type.Unknown(),
-      accessControl: { requiredScopes: [] },
-      handler: async () => ({ name: "test", extra: "field" }),
-    });
-
-    const callMap = new PendingRequestMap();
-    const handler = buildCallHandler({ registry, callMap });
-
-    const callPromise = callMap.call("test.unknownOutput", {});
-
-    handler({
-      requestId: [...callMap["requests"].keys()][0],
-      operationId: "test.unknownOutput",
-      input: {},
-    });
-
-    const result = await callPromise;
-    expect(result.data).toEqual({ name: "test", extra: "field" });
   });
 
   it("publishes call.error when operation not found", async () => {
@@ -609,27 +551,85 @@ describe("CallHandler", () => {
       resources: { "project:abc": ["read"] },
     };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).resolves.toBeUndefined();
+    const result = await handler({
+      requestId: "r1",
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    expect(result).toBeUndefined();
   });
 
   it("works without callMap for open operations", async () => {
     const registry = makeRegistry();
     const handler = buildCallHandler({ registry });
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.open",
-        input: {},
-      }),
-    ).resolves.toBeUndefined();
+    const result = await handler({
+      requestId: "r1",
+      operationId: "test.open",
+      input: {},
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it("applies Value.Cast normalization via execute()", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "defaultsFields",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "op with default fields",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Object({ name: Type.String(), count: Type.Number({ default: 0 }) }),
+      accessControl: { requiredScopes: [] },
+      handler: async () => ({ name: "test" }),
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    const callPromise = callMap.call("test.defaultsFields", {});
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.defaultsFields",
+      input: {},
+    });
+
+    const result = await callPromise;
+    expect(result.data).toEqual({ name: "test", count: 0 });
+  });
+
+  it("does not normalize with Value.Cast when outputSchema is Unknown", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "unknownOutput",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "op with unknown output",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+      handler: async () => ({ name: "test", extra: "field" }),
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    const callPromise = callMap.call("test.unknownOutput", {});
+
+    await handler({
+      requestId: [...callMap["requests"].keys()][0],
+      operationId: "test.unknownOutput",
+      input: {},
+    });
+
+    const result = await callPromise;
+    expect(result.data).toEqual({ name: "test", extra: "field" });
   });
 });
 
@@ -750,14 +750,13 @@ describe("checkAccess resource access control", () => {
       resources: { "project:abc": ["read"] },
     };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).resolves.toBeUndefined();
+    const result = await handler({
+      requestId: "r1",
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+    expect(result).toBeUndefined();
   });
 
   it("grants access when neither resourceType nor resourceAction are set", async () => {
@@ -766,14 +765,13 @@ describe("checkAccess resource access control", () => {
 
     const identity: Identity = { id: "user1", scopes: [] };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.open",
-        input: {},
-        identity,
-      }),
-    ).resolves.toBeUndefined();
+    const result = await handler({
+      requestId: "r1",
+      operationId: "test.open",
+      input: {},
+      identity,
+    });
+    expect(result).toBeUndefined();
   });
 
   it("grants access when identity.resources matches and identity has no scopes required", async () => {
@@ -786,13 +784,12 @@ describe("checkAccess resource access control", () => {
       resources: { "project:xyz": ["read", "write"] },
     };
 
-    await expect(
-      handler({
-        requestId: "r1",
-        operationId: "test.guarded",
-        input: {},
-        identity,
-      }),
-    ).resolves.toBeUndefined();
+    const result = await handler({
+      requestId: "r1",
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+    expect(result).toBeUndefined();
   });
 });

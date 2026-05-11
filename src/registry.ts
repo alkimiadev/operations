@@ -1,9 +1,11 @@
-import type { OperationContext, OperationSpec, OperationHandler, SubscriptionHandler } from "./types.js";
+import type { OperationContext, OperationSpec, OperationHandler, SubscriptionHandler, Identity, AccessControl } from "./types.js";
 import { getLogger } from "@logtape/logtape";
 import { Value } from "@alkdev/typebox/value";
 import { KindGuard } from "@alkdev/typebox";
 import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
 import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
+import { CallError, InfrastructureErrorCode } from "./error.js";
+import { checkAccess } from "./call.js";
 
 const logger = getLogger("operations:registry");
 
@@ -86,12 +88,40 @@ export class OperationRegistry {
   ): Promise<ResponseEnvelope<TOutput>> {
     const spec = this.specs.get(operationId);
     if (!spec) {
-      throw new Error(`Operation not found: ${operationId}`);
+      throw new CallError(
+        InfrastructureErrorCode.OPERATION_NOT_FOUND,
+        `Operation not found: ${operationId}`,
+        { operationId },
+      );
     }
 
     const handler = this.handlers.get(operationId);
     if (!handler) {
-      throw new Error(`No handler registered for operation: ${operationId}`);
+      throw new CallError(
+        InfrastructureErrorCode.OPERATION_NOT_FOUND,
+        `No handler registered for operation: ${operationId}`,
+        { operationId },
+      );
+    }
+
+    if (!context.trusted) {
+      const accessControl: AccessControl = spec.accessControl as AccessControl;
+      if (accessControl.requiredScopes.length > 0 || accessControl.requiredScopesAny?.length || accessControl.resourceType) {
+        if (!context.identity) {
+          throw new CallError(
+            InfrastructureErrorCode.ACCESS_DENIED,
+            `Access denied for operation: ${operationId} — identity required`,
+            { operationId, requiredScopes: accessControl.requiredScopes },
+          );
+        }
+        if (!checkAccess(accessControl, context.identity)) {
+          throw new CallError(
+            InfrastructureErrorCode.ACCESS_DENIED,
+            `Access denied for operation: ${operationId}`,
+            { requiredScopes: accessControl.requiredScopes },
+          );
+        }
+      }
     }
 
     validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);

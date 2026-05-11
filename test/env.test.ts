@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { OperationRegistry, OperationType, buildEnv, type IOperationDefinition, type OperationContext } from "../src/index.js";
 import * as Type from "@alkdev/typebox";
-import { PendingRequestMap } from "../src/call.js";
-import { localEnvelope, httpEnvelope, isResponseEnvelope, type ResponseEnvelope } from "../src/response-envelope.js";
+import { httpEnvelope, isResponseEnvelope, type ResponseEnvelope } from "../src/response-envelope.js";
+import { CallError, InfrastructureErrorCode } from "../src/error.js";
 import type { Identity } from "../src/types.js";
 
 function makeOperation(name: string, handler?: any): IOperationDefinition {
@@ -124,135 +124,95 @@ describe("buildEnv", () => {
     expect(env.other).toBeUndefined();
   });
 
-  it("routes through callMap in call protocol mode", async () => {
+  it("always uses execute() and sets trusted: true on nested context", async () => {
+    let capturedContext: OperationContext | undefined;
     const registry = new OperationRegistry();
-    registry.register(makeOperation("readFile"));
-
-    const callMap = {
-      call: async (opId: string, input: unknown, opts?: any): Promise<ResponseEnvelope> => {
-        return localEnvelope({ result: `routed: ${opId}` }, opId);
+    registry.register({
+      name: "inner",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "inner op",
+      inputSchema: Type.Object({ value: Type.String() }),
+      outputSchema: Type.Object({ result: Type.String() }),
+      accessControl: { requiredScopes: [] },
+      handler: async (input: any, ctx: OperationContext) => {
+        capturedContext = ctx;
+        return { result: input.value };
       },
-    };
-
-    const env = buildEnv({
-      registry,
-      context: {} as OperationContext,
-      callMap,
     });
 
-    const result = await env.test.readFile({ value: "test" });
+    const outerContext: OperationContext = {
+      requestId: "outer-123",
+      identity: { id: "user1", scopes: ["read"] },
+    };
+
+    const env = buildEnv({ registry, context: outerContext });
+    await env.test.inner({ value: "hello" });
+
+    expect(capturedContext).toBeDefined();
+    expect(capturedContext!.trusted).toBe(true);
+    expect(capturedContext!.requestId).toBe("outer-123");
+    expect(capturedContext!.identity).toEqual({ id: "user1", scopes: ["read"] });
+  });
+
+  it("skips access control for trusted nested calls", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "guarded",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "guarded op",
+      inputSchema: Type.Object({ value: Type.String() }),
+      outputSchema: Type.Object({ result: Type.String() }),
+      accessControl: {
+        requiredScopes: ["admin"],
+      },
+      handler: async (input: any) => ({ result: input.value }),
+    });
+
+    const outerContext: OperationContext = {
+      requestId: "outer-456",
+      identity: { id: "user1", scopes: ["read"] },
+    };
+
+    const env = buildEnv({ registry, context: outerContext });
+    const result = await env.test.guarded({ value: "secret" });
     expect(isResponseEnvelope(result)).toBe(true);
-    expect(result.data).toEqual({ result: "routed: test.readFile" });
+    expect(result.data).toEqual({ result: "secret" });
   });
 
-  it("passes parentRequestId through callMap in call protocol mode", async () => {
+  it("propagates identity through nested calls with trusted flag", async () => {
+    let capturedContext: OperationContext | undefined;
     const registry = new OperationRegistry();
-    registry.register(makeOperation("op1"));
-
-    let capturedOptions: any = null;
-    const callMap = {
-      call: async (opId: string, input: unknown, opts?: any): Promise<ResponseEnvelope> => {
-        capturedOptions = opts;
-        return localEnvelope({ result: "ok" }, opId);
+    registry.register({
+      name: "inner",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "inner op",
+      inputSchema: Type.Object({ value: Type.String() }),
+      outputSchema: Type.Object({ result: Type.String() }),
+      accessControl: { requiredScopes: [] },
+      handler: async (input: any, ctx: OperationContext) => {
+        capturedContext = ctx;
+        return { result: input.value };
       },
-    };
-
-    const context: OperationContext = {
-      requestId: "parent-req-123",
-    };
-
-    const env = buildEnv({
-      registry,
-      context,
-      callMap,
     });
-
-    await env.test.op1({ value: "test" });
-
-    expect(capturedOptions).not.toBeNull();
-    expect(capturedOptions.parentRequestId).toBe("parent-req-123");
-  });
-
-  it("passes identity through callMap in call protocol mode", async () => {
-    const registry = new OperationRegistry();
-    registry.register(makeOperation("op1"));
-
-    let capturedOptions: any = null;
-    const callMap = {
-      call: async (opId: string, input: unknown, opts?: any): Promise<ResponseEnvelope> => {
-        capturedOptions = opts;
-        return localEnvelope({ result: "ok" }, opId);
-      },
-    };
 
     const identity: Identity = { id: "user1", scopes: ["read"] };
-    const context: OperationContext = {
+    const outerContext: OperationContext = {
       requestId: "parent-req-456",
       identity,
     };
 
-    const env = buildEnv({
-      registry,
-      context,
-      callMap,
-    });
+    const env = buildEnv({ registry, context: outerContext });
+    await env.test.inner({ value: "test" });
 
-    await env.test.op1({ value: "test" });
-
-    expect(capturedOptions).not.toBeNull();
-    expect(capturedOptions.parentRequestId).toBe("parent-req-456");
-    expect(capturedOptions.identity).toEqual(identity);
-  });
-
-  it("does not pass identity when context has no identity in call protocol mode", async () => {
-    const registry = new OperationRegistry();
-    registry.register(makeOperation("op1"));
-
-    let capturedOptions: any = null;
-    const callMap = {
-      call: async (opId: string, input: unknown, opts?: any): Promise<ResponseEnvelope> => {
-        capturedOptions = opts;
-        return localEnvelope({ result: "ok" }, opId);
-      },
-    };
-
-    const context: OperationContext = {
-      requestId: "parent-req-789",
-    };
-
-    const env = buildEnv({
-      registry,
-      context,
-      callMap,
-    });
-
-    await env.test.op1({ value: "test" });
-
-    expect(capturedOptions).not.toBeNull();
-    expect(capturedOptions.parentRequestId).toBe("parent-req-789");
-    expect(capturedOptions.identity).toBeUndefined();
-  });
-
-  it("works with PendingRequestMap as callMap", async () => {
-    const registry = new OperationRegistry();
-    registry.register(makeOperation("echo"));
-
-    const callMap = new PendingRequestMap();
-    const env = buildEnv({
-      registry,
-      context: {} as OperationContext,
-      callMap,
-    });
-
-    const callPromise = env.test.echo({ value: "hello" });
-
-    const requestId = [...(callMap as any).requests.keys()][0];
-    callMap.respond(requestId, localEnvelope({ result: "echoed" }, "test.echo"));
-
-    const result = await callPromise;
-    expect(isResponseEnvelope(result)).toBe(true);
-    expect(result.data).toEqual({ result: "echoed" });
-    expect(result.meta.source).toBe("local");
+    expect(capturedContext).toBeDefined();
+    expect(capturedContext!.identity).toEqual(identity);
+    expect(capturedContext!.trusted).toBe(true);
   });
 
   it("returns empty env when registry has no specs", () => {

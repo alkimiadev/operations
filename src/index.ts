@@ -3,7 +3,7 @@ export type { IOperationDefinition, OperationHandler, SubscriptionHandler, Ident
 export { OperationRegistry } from "./registry.js";
 export { formatValueErrors, assertIsSchema, validateOrThrow, collectErrors } from "./validation.js";
 export { buildEnv } from "./env.js";
-export type { CallMap, EnvOptions } from "./env.js";
+export type { EnvOptions } from "./env.js";
 export { FromSchema } from "./from_schema.js";
 export { FromOpenAPI, FromOpenAPIFile, FromOpenAPIUrl } from "./from_openapi.js";
 export type { OpenAPISpec, OpenAPIOperation, OpenAPIParameter, HTTPServiceConfig, OpenAPIFS } from "./from_openapi.js";
@@ -11,7 +11,7 @@ export { scanOperations } from "./scanner.js";
 export type { OperationManifest, ScannerFS } from "./scanner.js";
 export { CallError, InfrastructureErrorCode, mapError } from "./error.js";
 export type { CallErrorCode } from "./error.js";
-export { PendingRequestMap, buildCallHandler } from "./call.js";
+export { PendingRequestMap, buildCallHandler, checkAccess } from "./call.js";
 export type { CallEventMap, CallEventMapValue, CallRequestedEvent, CallRespondedEvent, CallAbortedEvent, CallErrorEvent, CallHandler, CallHandlerConfig } from "./call.js";
 export { subscribe } from "./subscribe.js";
 export { createMCPClient, closeMCPClient, MCPClientLoader } from "./from_mcp.js";

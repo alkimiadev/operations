@@ -1,15 +1,10 @@
-import { Type, type Static, KindGuard } from "@alkdev/typebox";
-import { Value } from "@alkdev/typebox/value";
+import { Type, type Static } from "@alkdev/typebox";
 import { createPubSub, type PubSub } from "@alkdev/pubsub";
-import { getLogger } from "@logtape/logtape";
 import { OperationRegistry } from "./registry.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
-import { validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
-import { ResponseEnvelopeSchema, isResponseEnvelope, localEnvelope } from "./response-envelope.js";
+import { ResponseEnvelopeSchema } from "./response-envelope.js";
 import type { ResponseEnvelope } from "./response-envelope.js";
-import type { Identity, OperationContext, AccessControl, OperationSpec } from "./types.js";
-
-const logger = getLogger("operations:call");
+import type { Identity, OperationContext, AccessControl } from "./types.js";
 
 export const CallEventSchema = {
   "call.requested": Type.Object({
@@ -191,66 +186,18 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
   return async (event: CallRequestedEvent): Promise<void> => {
     const { requestId, operationId, input, identity } = event;
 
+    const context: OperationContext = {
+      requestId,
+      parentRequestId: event.parentRequestId,
+      identity,
+    };
+
     try {
-      const spec = registry.getSpec(operationId);
-
-      if (!spec) {
-        throw new CallError(
-          InfrastructureErrorCode.OPERATION_NOT_FOUND,
-          `Operation not found: ${operationId}`,
-          { operationId },
-        );
-      }
-
-      const handler = registry.getHandler(operationId);
-      if (!handler) {
-        throw new CallError(
-          InfrastructureErrorCode.OPERATION_NOT_FOUND,
-          `No handler registered for operation: ${operationId}`,
-          { operationId },
-        );
-      }
-
-      const accessControl: AccessControl = spec.accessControl as AccessControl;
-
-      if (identity && !checkAccess(accessControl, identity)) {
-        throw new CallError(
-          InfrastructureErrorCode.ACCESS_DENIED,
-          `Access denied for operation: ${operationId}`,
-          { requiredScopes: accessControl.requiredScopes },
-        );
-      }
-
-      const context: OperationContext = {
-        requestId,
-        parentRequestId: event.parentRequestId,
-        identity,
-      };
-
-      validateOrThrow(spec.inputSchema, input, `Input validation for ${operationId}`);
-
-      const result = await handler(input, context);
-
-      let envelope: ResponseEnvelope;
-      if (isResponseEnvelope(result)) {
-        envelope = result as ResponseEnvelope;
-      } else {
-        envelope = localEnvelope(result, operationId);
-      }
-
-      if (!KindGuard.IsUnknown(spec.outputSchema)) {
-        envelope.data = Value.Cast(spec.outputSchema, envelope.data);
-      }
-
-      const errors = collectErrors(spec.outputSchema, envelope.data);
-      if (errors.length > 0) {
-        logger.warn(`Output validation failed for ${operationId}:\n${formatValueErrors(errors)}`);
-      }
+      const envelope = await registry.execute(operationId, input, context);
 
       if (callMap) {
         callMap.respond(requestId, envelope);
       }
-
     } catch (error) {
       const callError = mapError(error);
       if (callMap) {
@@ -262,7 +209,7 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
   };
 }
 
-function checkAccess(accessControl: AccessControl, identity: Identity): boolean {
+export function checkAccess(accessControl: AccessControl, identity: Identity): boolean {
   const { requiredScopes, requiredScopesAny, resourceType, resourceAction } = accessControl;
 
   if (requiredScopes.length > 0) {
@@ -286,4 +233,12 @@ function checkAccess(accessControl: AccessControl, identity: Identity): boolean 
   }
 
   return true;
+}
+
+function isResponseEnvelope(value: unknown): value is ResponseEnvelope {
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  if (!("data" in obj) || !("meta" in obj)) return false;
+  if (typeof obj.meta !== "object" || obj.meta === null) return false;
+  return ["local", "http", "mcp"].includes((obj.meta as Record<string, unknown>).source as string);
 }
