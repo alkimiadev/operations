@@ -43,6 +43,7 @@ export function buildEnv(options: EnvOptions): OperationEnv {
         logger.debug(`Call protocol: ${operationId}`);
         return await callMap.call(operationId, input, {
           parentRequestId: context.requestId,
+          identity: context.identity,
         });
       };
     } else {
