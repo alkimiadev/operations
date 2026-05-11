@@ -1,7 +1,9 @@
 import type { OperationContext, OperationSpec, OperationHandler, SubscriptionHandler } from "./types.js";
 import { getLogger } from "@logtape/logtape";
 import { Value } from "@alkdev/typebox/value";
+import { KindGuard } from "@alkdev/typebox";
 import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
+import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
 
 const logger = getLogger("operations:registry");
 
@@ -81,7 +83,7 @@ export class OperationRegistry {
     operationId: string,
     input: TInput,
     context: OperationContext,
-  ): Promise<TOutput> {
+  ): Promise<ResponseEnvelope<TOutput>> {
     const spec = this.specs.get(operationId);
     if (!spec) {
       throw new Error(`Operation not found: ${operationId}`);
@@ -94,13 +96,24 @@ export class OperationRegistry {
 
     validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);
 
-    const result = await handler(input, context) as TOutput;
+    const result = await handler(input, context);
 
-    const errors = collectErrors(spec.outputSchema, result);
+    let envelope: ResponseEnvelope<TOutput>;
+    if (isResponseEnvelope(result)) {
+      envelope = result as ResponseEnvelope<TOutput>;
+    } else {
+      envelope = localEnvelope(result as TOutput, operationId);
+    }
+
+    if (!KindGuard.IsUnknown(spec.outputSchema)) {
+      envelope.data = Value.Cast(spec.outputSchema, envelope.data) as TOutput;
+    }
+
+    const errors = collectErrors(spec.outputSchema, envelope.data);
     if (errors.length > 0) {
       logger.warn(`Output validation failed for ${operationId}:\n${formatValueErrors(errors)}`);
     }
 
-    return result;
+    return envelope;
   }
 }

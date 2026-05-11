@@ -1,12 +1,13 @@
 import type { OperationContext } from "./types.js";
 import { OperationRegistry } from "./registry.js";
+import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
 
 export async function* subscribe(
   registry: OperationRegistry,
   operationId: string,
   input: unknown,
   context: OperationContext,
-): AsyncGenerator<unknown, void, unknown> {
+): AsyncGenerator<ResponseEnvelope, void, unknown> {
   const spec = registry.getSpec(operationId);
 
   if (!spec) {
@@ -23,7 +24,11 @@ export async function* subscribe(
 
   try {
     for await (const value of generator) {
-      yield value;
+      if (isResponseEnvelope(value)) {
+        yield value;
+      } else {
+        yield localEnvelope(value, operationId);
+      }
     }
   } finally {
     if (generator.return) {

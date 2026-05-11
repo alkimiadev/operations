@@ -1,10 +1,12 @@
-import { Type, type Static } from "@alkdev/typebox";
+import { Type, type Static, KindGuard } from "@alkdev/typebox";
+import { Value } from "@alkdev/typebox/value";
 import { createPubSub, type PubSub } from "@alkdev/pubsub";
 import { getLogger } from "@logtape/logtape";
 import { OperationRegistry } from "./registry.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
-import { validateOrThrow } from "./validation.js";
+import { validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
 import type { Identity, OperationContext, AccessControl, OperationSpec } from "./types.js";
+import { ResponseEnvelopeSchema, isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
 
 const logger = getLogger("operations:call");
 
@@ -23,7 +25,7 @@ export const CallEventSchema = {
   }),
   "call.responded": Type.Object({
     requestId: Type.String(),
-    output: Type.Unknown(),
+    output: ResponseEnvelopeSchema,
   }),
   "call.aborted": Type.Object({
     requestId: Type.String(),
@@ -52,7 +54,7 @@ type CallPubSubMap = {
 };
 
 interface PendingRequest {
-  resolve: (value: unknown) => void;
+  resolve: (value: ResponseEnvelope) => void;
   reject: (reason: unknown) => void;
   deadline?: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -121,7 +123,7 @@ export class PendingRequestMap {
     operationId: string,
     input: unknown,
     options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
-  ): Promise<unknown> {
+  ): Promise<ResponseEnvelope> {
     const requestId = crypto.randomUUID();
 
     return new Promise((resolve, reject) => {
@@ -148,7 +150,10 @@ export class PendingRequestMap {
     });
   }
 
-  respond(requestId: string, output: unknown): void {
+  respond(requestId: string, output: ResponseEnvelope): void {
+    if (!isResponseEnvelope(output)) {
+      throw new Error(`PendingRequestMap.respond() requires a ResponseEnvelope, got: ${typeof output}`);
+    }
     this.pubsub.publish("call.responded", "", {
       requestId,
       output,
@@ -180,10 +185,15 @@ export class PendingRequestMap {
 }
 
 export function buildCallHandler(config: CallHandlerConfig): CallHandler {
-  const { registry } = config;
+  const { registry, eventTarget } = config;
 
   return async (event: CallRequestedEvent): Promise<void> => {
     const { requestId, operationId, input, identity } = event;
+
+    let callMap: PendingRequestMap | undefined;
+    if (eventTarget) {
+      callMap = new PendingRequestMap(eventTarget);
+    }
 
     try {
       const spec = registry.getSpec(operationId);
@@ -223,10 +233,33 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
 
       validateOrThrow(spec.inputSchema, input, `Input validation for ${operationId}`);
 
-      await handler(input, context);
+      const result = await handler(input, context);
+
+      let envelope: ResponseEnvelope;
+      if (isResponseEnvelope(result)) {
+        envelope = result as ResponseEnvelope;
+      } else {
+        envelope = localEnvelope(result, operationId);
+      }
+
+      if (!KindGuard.IsUnknown(spec.outputSchema)) {
+        envelope.data = Value.Cast(spec.outputSchema, envelope.data);
+      }
+
+      const errors = collectErrors(spec.outputSchema, envelope.data);
+      if (errors.length > 0) {
+        logger.warn(`Output validation failed for ${operationId}:\n${formatValueErrors(errors)}`);
+      }
+
+      if (callMap) {
+        callMap.respond(requestId, envelope);
+      }
 
     } catch (error) {
       const callError = mapError(error);
+      if (callMap) {
+        callMap.emitError(requestId, callError.code, callError.message, callError.details);
+      }
       throw callError;
     }
   };

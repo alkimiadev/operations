@@ -5,6 +5,7 @@ import { OperationRegistry } from "../src/registry.js";
 import { Type } from "@alkdev/typebox";
 import { OperationType } from "../src/types.js";
 import type { Identity } from "../src/types.js";
+import { localEnvelope, isResponseEnvelope, type ResponseEnvelope } from "../src/response-envelope.js";
 
 describe("PendingRequestMap", () => {
   it("creates instance without event target", () => {
@@ -18,18 +19,25 @@ describe("PendingRequestMap", () => {
     expect(map.getPendingCount()).toBe(0);
   });
 
-  it("call() resolves when respond() is called", async () => {
+  it("call() resolves when respond() is called with envelope", async () => {
     const map = new PendingRequestMap();
 
     const callPromise = map.call("test.op", { value: "hello" });
 
     setTimeout(() => {
       const requestId = [...map["requests"].keys()][0];
-      map.respond(requestId, { result: "world" });
+      map.respond(requestId, localEnvelope({ result: "world" }, "test.op"));
     }, 10);
 
     const result = await callPromise;
-    expect(result).toEqual({ result: "world" });
+    expect(isResponseEnvelope(result)).toBe(true);
+    expect(result.meta.source).toBe("local");
+    expect(result.data).toEqual({ result: "world" });
+  });
+
+  it("respond() throws when called with non-envelope value", () => {
+    const map = new PendingRequestMap();
+    expect(() => map.respond("req-1", { result: "world" } as any)).toThrow("ResponseEnvelope");
   });
 
   it("call() rejects when emitError() is called", async () => {
@@ -83,7 +91,7 @@ describe("PendingRequestMap", () => {
     expect(map.getPendingCount()).toBe(1);
 
     const requestId = [...map["requests"].keys()][0];
-    map.respond(requestId, { result: "done" });
+    map.respond(requestId, localEnvelope({ result: "done" }, "test.op"));
 
     await callPromise;
     expect(map.getPendingCount()).toBe(0);

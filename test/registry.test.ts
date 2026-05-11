@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { OperationRegistry } from "../src/registry.js";
 import { OperationType, type IOperationDefinition, type OperationContext, type OperationSpec, type OperationHandler } from "../src/index.js";
+import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "../src/response-envelope.js";
 import * as Type from "@alkdev/typebox";
 import { Value } from "@alkdev/typebox/value";
 
@@ -89,11 +90,64 @@ describe("OperationRegistry", () => {
     expect(registry.getAllSpecs()).toHaveLength(2);
   });
 
-  it("executes an operation and validates input", async () => {
+  it("executes an operation and returns ResponseEnvelope", async () => {
     const registry = new OperationRegistry();
     registry.register(makeOperation());
-    const result = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
-    expect(result).toEqual({ result: "processed: hello" });
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+    expect(isResponseEnvelope(envelope)).toBe(true);
+    expect(envelope.meta.source).toBe("local");
+    expect((envelope.meta as any).operationId).toBe("test.testOp");
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+  });
+
+  it("wraps raw handler result in localEnvelope", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation());
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+    expect(envelope.meta.source).toBe("local");
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+    expect(typeof (envelope.meta as any).timestamp).toBe("number");
+  });
+
+  it("passes through pre-built ResponseEnvelope from handler", async () => {
+    const registry = new OperationRegistry();
+    const preBuilt = localEnvelope({ custom: "data" }, "custom.op");
+    registry.register(makeOperation({
+      handler: async () => preBuilt,
+    }));
+    const envelope = await registry.execute("test.testOp", { value: "x" }, {} as OperationContext);
+    expect(envelope).toBe(preBuilt);
+  });
+
+  it("normalizes output with Value.Cast when outputSchema is not Unknown", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      outputSchema: Type.Object({ result: Type.String(), count: Type.Number() }),
+      handler: async () => ({ result: "ok" }),
+    }));
+    const envelope = await registry.execute("test.testOp", { value: "x" }, {} as OperationContext);
+    expect((envelope.data as any).result).toBe("ok");
+    expect((envelope.data as any).count).toBe(0);
+  });
+
+  it("does not normalize when outputSchema is Unknown", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      outputSchema: Type.Unknown(),
+      handler: async () => ({ anything: "goes", extra: 42 }),
+    }));
+    const envelope = await registry.execute("test.testOp", { value: "x" }, {} as OperationContext);
+    expect(envelope.data).toEqual({ anything: "goes", extra: 42 });
+  });
+
+  it("normalizes mismatched output via Value.Cast and returns envelope", async () => {
+    const registry = new OperationRegistry();
+    registry.register(makeOperation({
+      handler: async () => ({ unexpected: "field" }),
+    }));
+    const envelope = await registry.execute("test.testOp", { value: "x" }, {} as OperationContext);
+    expect(isResponseEnvelope(envelope)).toBe(true);
+    expect((envelope.data as any).result).toBe("");
   });
 
   it("throws on invalid input", async () => {
@@ -119,15 +173,6 @@ describe("OperationRegistry", () => {
     ).rejects.toThrow("No handler registered");
   });
 
-  it("warns on output mismatch but returns result", async () => {
-    const registry = new OperationRegistry();
-    registry.register(makeOperation({
-      handler: async () => ({ unexpected: "field" }),
-    }));
-    const result = await registry.execute("test.testOp", { value: "x" }, {} as OperationContext);
-    expect(result).toEqual({ unexpected: "field" });
-  });
-
   it("registerSpec and registerHandler separately", async () => {
     const registry = new OperationRegistry();
     const spec = makeSpec();
@@ -138,8 +183,9 @@ describe("OperationRegistry", () => {
     expect(retrieved.name).toBe("testOp");
     expect(retrieved.handler).toBeDefined();
 
-    const result = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
-    expect(result).toEqual({ result: "processed: hello" });
+    const envelope = await registry.execute("test.testOp", { value: "hello" }, {} as OperationContext);
+    expect(envelope.data).toEqual({ result: "processed: hello" });
+    expect(envelope.meta.source).toBe("local");
   });
 
   it("registerHandler throws for unknown operation", () => {

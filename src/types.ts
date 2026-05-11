@@ -1,4 +1,5 @@
 import { Type, type Static, type TSchema } from "@alkdev/typebox";
+import type { ResponseEnvelope } from "./response-envelope.js";
 
 export enum OperationType {
   QUERY = "query",
@@ -12,7 +13,7 @@ export interface Identity {
   resources?: Record<string, string[]>
 }
 
-export type OperationEnv = Record<string, Record<string, (input: unknown) => Promise<unknown>>>
+export type OperationEnv = Record<string, Record<string, (input: unknown) => Promise<ResponseEnvelope>>>
 
 export const OperationContextSchema = Type.Object({
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
