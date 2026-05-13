@@ -1,5 +1,5 @@
 ---
-status: stable
+status: draft
 last_updated: 2026-05-11
 ---
 
@@ -209,11 +209,12 @@ See [call-protocol.md](call-protocol.md) for full semantics.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `constructor(eventTarget?)` | `(eventTarget?: EventTarget)` | Creates internal pubsub, wires subscription handlers for responded/error/aborted. |
-| `call(operationId, input, options?)` | `Promise<ResponseEnvelope>` | Publish `call.requested`, return Promise that resolves with `ResponseEnvelope` on `call.responded`. |
+| `call(operationId, input, options?)` | `Promise<ResponseEnvelope>` | Publish `call.requested`, return Promise that resolves with `ResponseEnvelope` on `call.responded`. For QUERY and MUTATION operations. |
+| `subscribe(operationId, input, options?)` | `AsyncIterable<ResponseEnvelope>` | Publish `call.requested`, return AsyncIterable that yields each `call.responded` event. For SUBSCRIPTION operations over remote transport. |
 | `respond(requestId, output)` | `void` | Publish `call.responded`. `output` must be `ResponseEnvelope` — `isResponseEnvelope()` guard throws on raw values. |
 | `emitError(requestId, code, message, details?)` | `void` | Publish `call.error`. |
-| `abort(requestId)` | `void` | Publish `call.aborted`, reject pending Promise. |
-| `getPendingCount()` | `number` | Number of in-flight requests. |
+| `abort(requestId)` | `void` | Publish `call.aborted`, reject pending Promise or close repeater. |
+| `getPendingCount()` | `number` | Number of in-flight requests (both call and subscribe). |
 
 ### `CallHandler`
 
@@ -260,7 +261,9 @@ async function* subscribe(
 
 Direct subscription execution. Gets the operation, casts its handler to `AsyncGenerator`, yields each value wrapped in `ResponseEnvelope`. If a yielded value is already an envelope (`isResponseEnvelope()`), it passes through. Otherwise, `localEnvelope(value, operationId)` wraps it. Properly cleans up the generator on iteration stop (calls `generator.return()` in `finally`).
 
-This is the synchronous alternative to the call protocol's `call.requested` → `call.responded` flow for subscriptions. Use `subscribe()` for in-process subscription consumption; use `PendingRequestMap` for cross-transport subscription.
+This is the in-process subscription path. For remote subscriptions over a pubsub transport, use `PendingRequestMap.subscribe()` which routes `call.requested` events and yields each `call.responded` envelope.
+
+**SSE operations** (`text/event-stream` endpoints in OpenAPI) are `SUBSCRIPTION`-type operations with `SubscriptionHandler` (AsyncGenerator) handlers. They parse the SSE stream and yield individual events. Both `subscribe()` and `PendingRequestMap.subscribe()` can consume them — `subscribe()` for local, `PendingRequestMap.subscribe()` for remote over WebSocket/Redis transport.
 
 ## Env Builder
 

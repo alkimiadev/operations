@@ -1,5 +1,5 @@
 ---
-status: stable
+status: draft
 last_updated: 2026-05-11
 ---
 
@@ -150,9 +150,104 @@ Publishes `call.error`. Used by handlers to send errors.
 
 Looks up the `PendingRequest`, clears its timer, publishes `call.aborted`, rejects the Promise with `CallError(ABORTED, ...)`.
 
+### `subscribe(operationId, input, options?)`
+
+```ts
+subscribe(
+  operationId: string,
+  input: unknown,
+  options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
+): AsyncIterable<ResponseEnvelope>
+```
+
+The subscription counterpart to `call()`. Uses the same event types (`call.requested`, `call.responded`, `call.aborted`, `call.error`) and the same `requestId` correlation, but yields each `call.responded` event instead of resolving after the first one.
+
+1. Generate `requestId` via `crypto.randomUUID()`
+2. Create a `Repeater` (from `@alkdev/pubsub`) keyed by `requestId`
+3. Publish `call.requested` event with all fields
+4. Return the `Repeater` as `AsyncIterable<ResponseEnvelope>`
+5. On each `call.responded:{requestId}` event: push `responded.output` to the repeater
+6. On `call.error:{requestId}`: push the error (the Repeater throws from the iterator, then closes)
+7. On `call.aborted:{requestId}`: close the repeater (iterator completes)
+8. On consumer iteration stop: publish `call.aborted` and clean up
+
+This enables remote subscriptions over any `EventTarget` transport. The consumer iterates:
+
+```ts
+for await (const envelope of pendingRequestMap.subscribe("opensemaphore.events", { repo: "alkdev/operations" }, { identity })) {
+  // envelope is a ResponseEnvelope per SSE event
+}
+```
+
+The handler on the other side must be an `AsyncGenerator` (i.e., a `SubscriptionHandler`). The `CallHandler` on the hub side calls `subscribe()` internally and publishes each yielded envelope as `call.responded`.
+
+### Internal Routing: `call()` vs `subscribe()` per `requestId`
+
+`PendingRequestMap` must track whether a given `requestId` belongs to a `call()` or a `subscribe()` to correctly route `call.responded` events. The internal data structure is:
+
+```ts
+type PendingEntry =
+  | { type: "call"; promise: PendingRequest }      // single-resolution Promise
+  | { type: "subscribe"; repeater: Repeater }       // multi-yield AsyncIterable
+```
+
+When `call.responded:{requestId}` arrives:
+- If `type: "call"` → resolve the promise and delete the entry
+- If `type: "subscribe"` → push `responded.output` to the repeater (entry persists until the stream ends)
+
+When `call.error:{requestId}` arrives:
+- If `type: "call"` → reject the promise and delete the entry
+- If `type: "subscribe"` → push the error to the repeater (Repeater throws), then close the repeater and delete the entry
+
+When `call.aborted:{requestId}` arrives:
+- If `type: "call"` → reject the promise and delete the entry
+- If `type: "subscribe"` → close the repeater (iterator completes), then delete the entry
+
+Orphaned events (arriving after the consumer has stopped iterating or the entry was already deleted) are silently ignored — no error, no warning, no side effects.
+
+#### Relationship to `subscribe()` direct function
+
+| Aspect | `subscribe()` (direct) | `PendingRequestMap.subscribe()` |
+|--------|----------------------|-------------------------------|
+| Transport | In-process (calls handler directly) | Remote (via pubsub EventTarget) |
+| Handler access | Registry lookup in same process | Hub side: registry lookup, handler call |
+| Event routing | None — direct AsyncGenerator | `call.requested` → handler → `call.responded` per yield |
+| Use case | Local subscriptions | Cross-process subscriptions (WebSocket, Redis, etc.) |
+| Cleanup | Generator `return()` | Publish `call.aborted` + repeater stop |
+
+Both return `AsyncIterable<ResponseEnvelope>` — same consumption pattern, different routing.
+
+### Subscription Lifecycle
+
+#### Error Propagation
+
+| Scenario | `subscribe()` (direct) | `PendingRequestMap.subscribe()` |
+|----------|----------------------|-------------------------------|
+| Handler throws before first yield | `CallError` propagates to caller | `call.error` published, Repeater throws, consumer's `for await` catches the error |
+| Handler throws mid-stream | Error propagates from generator, `finally` block runs | `call.error` published, Repeater throws, consumer's `for await` catches the error |
+| Pre-handler errors (ACCESS_DENIED, VALIDATION_ERROR) | `CallError` thrown from `subscribe()` | `CallHandler` catches and publishes `call.error`, Repeater throws to consumer |
+| `call.error` event arrives (remote) | N/A (in-process) | Repeater receives error, consumer's `for await` sees it |
+
+#### Cleanup
+
+| Scenario | `subscribe()` (direct) | `PendingRequestMap.subscribe()` |
+|----------|----------------------|-------------------------------|
+| Consumer stops iteration (`break`) | `generator.return()` called in `finally` | `call.aborted` published, Repeater closed, hub's `CallHandler` receives abort and calls `generator.return()` |
+| Consumer's `for await` completes naturally | Generator's `return()` called if `finally` block has cleanup | Repeater stops, no `call.aborted` published |
+| Transport disconnect | N/A (in-process) | Hub may continue until timeout/closure; no heartbeat specified yet (see open questions) |
+
+#### Abortion
+
+When a consumer calls `pendingRequestMap.abort(requestId)` for a subscription:
+1. `call.aborted:{requestId}` is published to the pubsub
+2. The Repeater is closed (consumer's `for await` loop ends)
+3. The hub-side `CallHandler` receives `call.aborted`, calls `generator.return()` on the subscription handler (triggers `finally` block for stream cleanup)
+
+When the direct `subscribe()` consumer breaks out of iteration, the generator's `finally` block runs automatically — no `call.aborted` event needed (in-process, no transport).
+
 ## CallHandler
 
-`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()`. It delegates to `execute()` for the full invocation pipeline (lookup, access control, validation, handler, envelope wrapping, normalization, output validation), taking full ownership of publishing `call.responded`.
+`buildCallHandler` creates a function that bridges pubsub events to `OperationRegistry.execute()` or `subscribe()`. It delegates to `execute()` for QUERY/MUTATION operations and to `subscribe()` for SUBSCRIPTION operations.
 
 ```ts
 function buildCallHandler(config: CallHandlerConfig): CallHandler
@@ -168,11 +263,30 @@ type CallHandler = (event: CallRequestedEvent) => Promise<void>
 ### Handler Flow
 
 1. Construct `OperationContext` from the event (`requestId`, `parentRequestId`, `identity` — `trusted` is NOT set, remote calls always run access control)
-2. Call `registry.execute(operationId, input, context)` — this performs all validation, access control, and result pipeline
-3. On success: publish `call.responded` via `callMap.respond(requestId, envelope)`
-4. On failure: `mapError` converts the thrown value to `CallError`, publish `call.error`
+2. Look up the operation spec via `registry.getSpec(operationId)`
+3. If spec not found → publish `call.error` with `OPERATION_NOT_FOUND`
+4. If spec type is `QUERY` or `MUTATION`:
+   a. Call `registry.execute(operationId, input, context)` — this performs all validation, access control, and result pipeline
+   b. On success: publish `call.responded` via `callMap.respond(requestId, envelope)`
+   c. On failure: `mapError` converts the thrown value to `CallError`, publish `call.error`
+5. If spec type is `SUBSCRIPTION`:
+   a. Call `subscribe(registry, operationId, input, context)` — this checks access control and wraps yields in `ResponseEnvelope`
+   b. For each yielded envelope: publish `call.responded` via `callMap.respond(requestId, envelope)`
+   c. On generator completion: iterator ends naturally
+   d. On generator error: `mapError` converts the error, publish `call.error`
+   e. On `call.aborted:{requestId}`: call `generator.return()` to clean up the subscription
+
+**Note on ADR-006**: [ADR-006](decisions/006-unified-invocation-path.md) specifies that `CallHandler` should be a "thin adapter that calls `registry.execute()`." For QUERY/MUTATION operations, this is the case. For SUBSCRIPTION operations, `CallHandler` must call `subscribe()` directly because `execute()` is designed for single-return operations (it `await`s the handler return value). Making `execute()` aware of SUBSCRIPTION type and routing to `subscribe()` internally would conflate two execution models in one function. The explicit dispatch in `CallHandler` is the correct design — `execute()` handles single-return operations, `subscribe()` handles streaming operations, and `CallHandler` routes between them based on `spec.type`.
+
+**Handling pre-generator errors**: Both `registry.execute()` and `subscribe()` can throw before reaching the handler (e.g., `OPERATION_NOT_FOUND`, `ACCESS_DENIED`, `VALIDATION_ERROR`). `CallHandler` wraps the entire invocation in a try/catch, so these pre-generator errors are caught and published as `call.error`. For subscriptions, this means errors during access control, validation, or spec/handler lookup are reported via `call.error`, not silently swallowed.
 
 **Key change**: In the pre-envelope model, handlers were responsible for publishing `call.responded` themselves (the handler return value was discarded). In the envelope model, `CallHandler` owns wrapping and publishing. Handler return values are captured and wrapped. This ensures every response goes through the envelope pipeline — no raw values can bypass it.
+
+### Subscription Handling Detail
+
+For `SUBSCRIPTION` operations, the `CallHandler` iterates the async generator and publishes each yield as `call.responded`. This means a single `call.requested` event can produce **multiple** `call.responded` events with the same `requestId`. The `PendingRequestMap.subscribe()` method consumes this stream.
+
+The `call.aborted` event terminates the subscription. When the hub-side `CallHandler` receives `call.aborted:{requestId}`, it calls `generator.return()` on the active subscription handler. This triggers the generator's `finally` block (stream cleanup, resource release).
 
 ### MCP and OpenAPI Handlers
 
@@ -272,9 +386,33 @@ The call protocol is transport-agnostic. The `PubSub` event target determines ho
 |-----------|----------|-----------------|
 | In-process | Local hub operations | Browser `EventTarget` (default) |
 | Redis | Cross-process events | `RedisEventTarget` (from `@alkdev/pubsub`) |
-| WebSocket | Hub ↔ spoke bidirectional | `WebSocketEventTarget` (future) |
+| WebSocket client | Spoke → Hub bidirectional | `WebSocketClientEventTarget` (from `@alkdev/pubsub`) |
+| WebSocket server | Hub → Spoke fan-out | `WebSocketServerEventTarget` (from `@alkdev/pubsub`) |
 
-Same protocol, same event shapes, same `PendingRequestMap` — different `eventTarget`.
+Same protocol, same event shapes, same `PendingRequestMap` — different `eventTarget`. Both `call()` and `subscribe()` work over any transport — the only difference is consumption pattern (single-resolution Promise vs. AsyncIterable).
+
+### WebSocket Topology
+
+The WebSocket event targets from `@alkdev/pubsub` carry call protocol events between hub and spoke processes:
+
+```
+Spoke process                              Hub process
+     │                                           │
+     │  createPubSub({                           │  createPubSub({
+     │    eventTarget:                           │    eventTarget:
+     │      WebSocketClientET                    │      WebSocketServerET
+     │  })                                       │  })
+     │                                           │
+     │  pendingRequestMap                        │
+     │    .call(op, input) ── ws ──────────────> │  CallHandler → execute()
+     │    .subscribe(op, input) ── ws ─────────> │  CallHandler → subscribe()
+     │                                           │
+     │  <── call.responded ────────────────── ws │
+     │  <── call.responded ────────────────── ws │  (multiple for subscribe)
+     │  <── call.error ────────────────────── ws │
+```
+
+The WebSocket client adapter handles `__subscribe`/`__unsubscribe` control events automatically — when `PendingRequestMap` subscribes to `call.responded:{requestId}`, the client adapter sends `__subscribe` for that topic, and the server adapter routes only matching events to that spoke. See [ADR-003](../../../@alkdev/pubsub/docs/architecture/decisions/003-subscription-control-protocol.md) in `@alkdev/pubsub`.
 
 ## Subscribe (Direct)
 

@@ -1,6 +1,6 @@
 ---
 status: accepted
-last_updated: 2026-05-11
+last_updated: 2026-05-13
 ---
 
 # ADR-006: Unified Invocation Path
@@ -35,9 +35,9 @@ This ADR depends on ADR-005 (response envelopes) being implemented in source fir
 
 ## Decision
 
-**Unify on `execute()` as the single invocation entry point.** All consumers — local in-process code, `buildEnv()`, and future worker pool routers — call `registry.execute()` and get the same behavior: envelope wrapping, result pipeline, access control, consistent error handling.
+**Unify on `execute()` as the single invocation entry point.** All consumers — local in-process code, `buildEnv()`, and future spoke/hub routers — call `registry.execute()` and get the same behavior: envelope wrapping, result pipeline, access control, consistent error handling.
 
-The call protocol (`call.requested` / `call.responded` / `CallHandler` / `PendingRequestMap`) becomes an **internal transport mechanism** for routing invocations across process boundaries. It is not a public invocation path — it's the plumbing that `execute()` uses when the target handler is in another process.
+The call protocol (`call.requested` / `call.responded` / `CallHandler` / `PendingRequestMap`) is the **primary integration surface** for bi-directional cross-process communication. Spokes and hubs exchange call protocol events over pubsub transports (WebSocket, Redis). `PendingRequestMap`, `CallHandler`, and `CallEventSchema` remain public exports — they are the API that spoke and hub SDKs integrate against. This is not internal plumbing; it is the product's interop layer.
 
 ### Architectural model
 
@@ -121,7 +121,7 @@ The `customAuth` field on `AccessControl` is declared but not yet enforced anywh
 
 2. **`buildEnv()` always uses `registry.execute()`.** The `callMap` option is removed from `buildEnv()`. `OperationEnv` functions call `execute()` directly. Nested calls propagate the same `context` (plus `trusted: true`).
 
-3. **Call protocol is internal transport.** `PendingRequestMap`, `CallHandler`, and `CallEventSchema` become internal implementation details, not part of the public invocation API. They exist for cross-process routing only.
+3. **Call protocol is the integration surface.** `PendingRequestMap`, `CallHandler`, and `CallEventSchema` remain public exports. They are the API that spoke and hub SDKs integrate against for cross-process communication. Consumers construct `PendingRequestMap` with a transport `EventTarget` and use `call()` / `subscribe()` directly. `buildCallHandler()` bridges incoming events to `registry.execute()`.
 
 4. **`CallHandler` calls `registry.execute()` on the worker side.** Instead of duplicating lookup, validation, and access control, the worker-side `CallHandler` becomes a thin adapter:
    ```ts
@@ -148,9 +148,9 @@ The `customAuth` field on `AccessControl` is declared but not yet enforced anywh
 
 ### What stays the same
 
-- **`PendingRequestMap`**: Still needed for routing `call.responded` back to the correct promise. Internal transport plumbing.
-- **`CallEventSchema`**: Still the wire format for cross-process communication. Internal.
-- **`subscribe()`**: Direct in-process subscriptions remain. They call the handler's async generator directly with envelope wrapping. `subscribe()` also applies access control when `identity` is present (consistent with `execute()`). Envelope wrapping per yield is addressed by ADR-005.
+- **`PendingRequestMap`**: Routes `call.responded` back to the correct promise or Repeater. The primary API for spoke/hub callers to invoke remote operations over a pubsub transport.
+- **`CallEventSchema`**: The wire format for cross-process communication. The interop contract between hub and spoke.
+- **`subscribe()`**: Direct in-process subscriptions remain. They call the handler's async generator directly with envelope wrapping. `subscribe()` also applies access control when `identity` is present (consistent with `execute()`). Envelope wrapping per yield is addressed by ADR-005. For remote subscriptions over a transport, use `PendingRequestMap.subscribe()` (see ADR-007).
 - **Adapters (`from_mcp`, `from_openapi`)**: Register handlers in the registry as before. Their handlers return `ResponseEnvelope` instances (via factory functions) as the envelope spec describes.
 
 ### What changes
@@ -162,7 +162,7 @@ The `customAuth` field on `AccessControl` is declared but not yet enforced anywh
 | `execute()` doesn't wrap in envelope | `execute()` applies result pipeline (detect → wrap → normalize → validate) |
 | `buildEnv()` toggles `execute()` vs `callMap.call()` | `buildEnv()` always uses `execute()` |
 | `CallHandler` duplicates handler invocation | `CallHandler` calls `registry.execute()` internally |
-| `callMap` is a public concept | Call protocol is internal transport plumbing |
+| `callMap` is a public concept | Call protocol is the public cross-process integration API |
 | Two different invocation guarantees | Same behavior regardless of local/remote |
 | `OperationContext` has no `trusted` field | `OperationContext` gains `trusted?: boolean` |
 | Identity not propagated through `buildEnv()` | `buildEnv()` propagates identity and sets `trusted: true` |
@@ -202,7 +202,7 @@ Subscriptions are excluded from `OperationEnv` (as currently) — `buildEnv()` o
 ### Negative
 
 - **Performance for local calls**: `execute()` now applies access control, envelope wrapping, `Value.Cast()` normalization, and output validation on every call, even trusted same-process calls. The `trusted` flag skips redundant scope checks, but envelope wrapping and validation remain. Estimated overhead: ~1-5μs per call for envelope construction + detection + access check. This is acceptable for our use case (operations are typically milliseconds to seconds). Benchmark before stabilizing.
-- **API change**: Removing `callMap` from `buildEnv()` and making call protocol internal is a breaking change. Package is pre-1.0; consumers are coordinated.
+- **API change**: Removing `callMap` from `buildEnv()` is a breaking change. `buildCallHandler()` now requires `callMap` explicitly rather than the `CallHandler` owning transport configuration. Package is pre-1.0; consumers are coordinated.
 - **Complexity in `execute()`**: Routing logic (local vs. remote) adds conditional paths inside `execute()`. This is simpler than the current external toggle, but `execute()` becomes more complex internally.
 
 ### Risks
@@ -217,11 +217,11 @@ Subscriptions are excluded from `OperationEnv` (as currently) — `buildEnv()` o
 2. **Update `execute()`** — return `Promise<ResponseEnvelope<TOutput>>`, apply result pipeline (detect → wrap → normalize → validate), add access control check.
 3. **Add `trusted` to `OperationContext`** — internal-only, set by `buildEnv()`.
 4. **Update `buildEnv()`** — remove `callMap` option, always call `execute()`, propagate `context` with `trusted: true`.
-5. **Simplify `CallHandler`** — thin adapter that calls `registry.execute()`, catches errors, publishes events.
+5. **Simplify `CallHandler`** — thin adapter that calls `registry.execute()`, catches errors, publishes events. Now requires explicit `callMap` parameter.
 6. **Update `subscribe()`** — add access control check, wrap yields in `ResponseEnvelope`.
 7. **Update `OperationEnv` return type** — `Promise<unknown>` → `Promise<ResponseEnvelope>`.
-8. **Add remote routing to `execute()`** — when EventTarget transport is configured on registry and handler is not local, publish `call.requested` and await response. (Deferred until worker pool is built.)
-9. **Move call protocol exports** — `PendingRequestMap`, `CallHandler`, `CallEventSchema` move from public barrel to internal. `call()` and `respond()` become internal APIs.
+8. **Add remote routing to `execute()`** — when EventTarget transport is configured on registry and handler is not local, publish `call.requested` and await response. (Deferred until spoke/hub transport is built.)
+9. ~~**Move call protocol exports**~~ — **Struck.** Call protocol types remain public exports as the integration surface for spoke/hub SDKs.
 
 ## References
 

@@ -325,7 +325,9 @@ Key differences from current behavior:
 
 ### OpenAPI Adapter (`from_openapi.ts`)
 
-Handler behavior change:
+#### QUERY / MUTATION handler
+
+Handler behavior for single-return operations:
 
 ```ts
 handler: async (input, context) => {
@@ -358,6 +360,55 @@ handler: async (input, context) => {
 - Success responses → wrapped in `httpEnvelope` with full HTTP metadata
 - Headers are a `Record<string, string>` snapshot (multi-value headers joined with `, ` per fetch spec)
 
+#### SUBSCRIPTION handler (SSE)
+
+For `SUBSCRIPTION`-type operations (detected by `text/event-stream` in response content type), the handler is an `AsyncGenerator` that:
+
+```ts
+handler: async function* (input, context) => {
+  // ... URL construction and fetch logic (same as QUERY/MUTATION) ...
+  const response = await fetch(url, fetchOptions)
+
+  if (!response.ok) {
+    throw new CallError("EXECUTION_ERROR", `HTTP ${response.status}: ${response.statusText}`)
+  }
+
+  // Parse the SSE stream
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let eventType = ""
+  let data = ""
+  let lastEventId = ""
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      // Parse SSE frames from buffer
+      // ... (see adapters.md for full parsing rules) ...
+
+      // When a complete event is dispatched:
+      yield httpEnvelope(parsedData, {
+        statusCode: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        contentType: "text/event-stream",
+      })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+```
+
+- Each SSE event is yielded as a `ResponseEnvelope` with `meta.contentType: "text/event-stream"`
+- The SSE `event` type and `id` fields are not carried in the envelope — a future `SSEResponseMeta` source type may be added if per-event metadata is needed
+- On HTTP error status → throw `CallError` from the generator body before first yield
+- On stream parse error → log warning, skip malformed frame, continue
+- `finally` block closes the `ReadableStream` reader
+
 ### Value.Cast() for Data Normalization
 
 The shared result pipeline (defined above) includes `Value.Cast()` normalization as step 3. This section provides additional context on how `Value.Cast()` works and why it matters for each source:
@@ -379,7 +430,17 @@ Operations with `Type.Unknown()` `outputSchema` (typically MCP tools without `ou
 })
 ```
 
-## `outputSchema` and Validation
+## Type Erasure at Runtime Boundaries
+
+`ResponseEnvelope<T>` carries a compile-time type parameter `T`, but at the call protocol boundary (pubsub serialization, WebSocket transport), `T` is erased to `unknown`. This means:
+
+- `registry.execute<TInput, TOutput>()` returns `Promise<ResponseEnvelope<TOutput>>` — type-safe at compile time
+- `PendingRequestMap.call()` returns `Promise<ResponseEnvelope>` — `TOutput` is not available (the caller doesn't know the operation's output type without a spec lookup)
+- `subscribe()` yields `AsyncGenerator<ResponseEnvelope, void, unknown>` — similarly untyped
+
+The runtime guarantee for `envelope.data` shape is `outputSchema` + `Value.Cast()` normalization (step 3 of the shared result pipeline). When `outputSchema` is `Type.Unknown()`, no runtime shape guarantee exists — the consumer must handle arbitrary data.
+
+## `outputSchema` and Validation`
 
 `outputSchema` on `OperationSpec` validates `envelope.data`, not the full `ResponseEnvelope`. The envelope has its own `ResponseEnvelopeSchema` for call protocol validation. This keeps `outputSchema` focused on business data shape — no envelope schema bloat, and existing `outputSchema` definitions don't need changes.
 
@@ -405,9 +466,9 @@ The normalization step is optional: if `outputSchema` is `Type.Unknown()`, norma
 
 1. **Client abstraction** — Envelopes provide metadata and `unwrap()` provides simple access, but real usage may reveal patterns that justify a higher-level abstraction: e.g., a client that auto-handles MCP `isError` results (throwing on error content vs. returning it), or one that extracts pagination cursors from HTTP headers. Deferred until usage patterns from alkhub and opencode confirm whether `unwrap()` + `meta.source` dispatch is sufficient or whether a typed "client" per source adds real value.
 
-2. **Subscription envelopes** — `subscribe()` wraps each yield in `ResponseEnvelope`. For long-running subscriptions, `localResponseMeta.timestamp` updates per yield. Whether subscriptions need additional metadata (e.g., sequence numbers, cursor positions) is an open question for future iteration.
+2. **SSEResponseMeta** — SSE events currently use `httpEnvelope()` with `contentType: "text/event-stream"`. The SSE `event` type and `id` fields are **dropped** by the parser — they are not available in the `ResponseEnvelope`. The `data` field value (typically JSON) is the primary `envelope.data` payload. A future `SSEResponseMeta` with `source: "sse"`, `eventType: string`, `lastEventId: string` could carry this per-event metadata if usage patterns confirm the need. See [ADR-007](decisions/007-subscription-transport.md).
 
-3. **`respond()` visibility** — Currently public on `PendingRequestMap`. After CallHandler takes ownership of publishing, `respond()` may become internal-only to enforce the envelope invariant.
+3. **`respond()` visibility** — Resolved: `respond()` remains public on `PendingRequestMap`. The call protocol is the integration surface for spoke/hub SDKs (see amended ADR-006), which means spokes need `respond()` for publishing `call.responded` events back to the hub. The envelope invariant is still enforced by the `isResponseEnvelope()` guard.
 
 4. **Envelope directionality (serving)** — The current design covers **consuming** remote operations (MCP, OpenAPI) and wrapping their results. The reverse direction — **serving** local operations via MCP or OpenAPI — is not yet addressed. When exposing operations as an MCP server, results must be wrapped in MCP's `CallToolResult` format (`structuredContent` + `content`). When exposing as OpenAPI, results must be serialized as HTTP response bodies. How envelopes interact with this serving direction is an open design question.
 
@@ -435,20 +496,28 @@ The following documentation changes have been completed:
 | `adapters.md` | `from_mcp` | `outputSchema` extracted when available, via `FromSchema`. Falls back to `Type.Unknown()`. | ✅ |
 | `adapters.md` | `from_openapi` | Handler returns `httpEnvelope()`. Error on HTTP error status still throws `CallError`. | ✅ |
 
-The following **code** changes have been completed:
+The following **documentation** changes are pending for the subscription transport feature:
+
+| Document | Section | Change | Status |
+|----------|---------|--------|--------|
+| `adapters.md` | `FromOpenAPI` SSE handlers | Subscription handler as AsyncGenerator, SSE parsing, per-yield envelope | ✅ (doc updated) |
+| `call-protocol.md` | PendingRequestMap | Add `subscribe()` method for remote subscriptions | ✅ (doc updated) |
+| `call-protocol.md` | CallHandler | Dispatch on operation type: `execute()` for QUERY/MUTATION, `subscribe()` for SUBSCRIPTION | ✅ (doc updated) |
+| `call-protocol.md` | Transport Mapping | Add WebSocket topology diagram, mention `subscribe()` over transport | ✅ (doc updated) |
+| `api-surface.md` | PendingRequestMap | Add `subscribe()` method to the table | ✅ (doc updated) |
+| `api-surface.md` | Subscribe | Add SSE operations note, mention `PendingRequestMap.subscribe()` for remote | ✅ (doc updated) |
+| `decisions/007-subscription-transport.md` | New ADR | SSE subscription handler, PendingRequestMap.subscribe(), CallHandler dispatch | ✅ (doc created) |
+| `response-envelopes.md` | OpenAPI adapter | Separate QUERY/MUTATION handler from SUBSCRIPTION handler (SSE) | ✅ (doc updated) |
+| `response-envelopes.md` | Open Questions | Replace subscription envelopes question with SSEResponseMeta question | ✅ (doc updated) |
+
+The following **code** changes are pending:
 
 | Code | Change | Status |
 |------|--------|--------|
-| `src/response-envelope.ts` | New file: types, factory functions, detection, schemas | ✅ |
-| `src/registry.ts` | `execute()` returns `Promise<ResponseEnvelope<TOutput>>` | ✅ |
-| `src/call.ts` | `CallHandler` captures return value, wraps in envelope, publishes `call.responded` | ✅ |
-| `src/call.ts` | `CallEventSchema` `output` field changes to `ResponseEnvelopeSchema` | ✅ |
-| `src/call.ts` | `PendingRequestMap.respond()` adds `isResponseEnvelope()` guard | ✅ |
-| `src/call.ts` | `PendingRequestMap.call()` resolves with `ResponseEnvelope` | ✅ |
-| `src/subscribe.ts` | `subscribe()` wraps yields in `ResponseEnvelope` | ✅ |
-| `src/env.ts` | `buildEnv()` functions return `Promise<ResponseEnvelope>` | ✅ |
-| `src/from_mcp.ts` | Handler returns `mcpEnvelope()`, extracts `outputSchema`, uses `structuredContent` | ✅ |
-| `src/from_openapi.ts` | Handler returns `httpEnvelope()` | ✅ |
+| `src/from_openapi.ts` | Generate `SubscriptionHandler` (AsyncGenerator) for SUBSCRIPTION operations, parse SSE stream, yield per-event | ❌ Not started |
+| `src/call.ts` | Add `PendingRequestMap.subscribe()` method using Repeater from `@alkdev/pubsub` | ❌ Not started |
+| `src/call.ts` | Update `CallHandler` to dispatch on operation type | ❌ Not started |
+| `src/subscribe.ts` | Ensure `subscribe()` handles `httpEnvelope` detection for SSE yields | ✅ Already handles envelopes |
 
 ## References
 

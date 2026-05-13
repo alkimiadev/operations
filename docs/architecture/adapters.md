@@ -1,5 +1,5 @@
 ---
-status: stable
+status: draft
 last_updated: 2026-05-11
 ---
 
@@ -57,12 +57,12 @@ const typeboxSchema = FromSchema({
 
 ### Purpose
 
-Generates `OperationSpec & { handler }[]` from OpenAPI specs. Each path+method combination becomes an operation with an auto-generated `fetch` handler.
+Generates `OperationSpec & { handler }[]` from OpenAPI specs. Each path+method combination becomes an operation with an auto-generated handler. QUERY and MUTATION operations use `OperationHandler` (single-return); SUBSCRIPTION operations use `SubscriptionHandler` (AsyncGenerator).
 
 ### `FromOpenAPI(spec, config)`
 
 ```ts
-function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: OperationHandler }>
+function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: OperationHandler | SubscriptionHandler }>
 ```
 
 Processes all paths in the spec. For each path and method combination:
@@ -72,12 +72,21 @@ Processes all paths in the spec. For each path and method combination:
 3. **Build output schema** — extracts response schema from `200`/`201` content, falls back to `Type.Unknown()`
 4. **Detect operation type** — `GET` → `QUERY`, `text/event-stream` response → `SUBSCRIPTION`, everything else → `MUTATION`
 5. **Generate operation id** — uses `operationId` if present, otherwise normalizes `{method}_{path_parts}`
-6. **Create handler** — auto-generated `fetch` handler that:
-   - Interpolates path parameters into the URL
-   - Passes query parameters as search params
-   - Sends request body as JSON
-   - Applies auth headers from config
-    - Returns JSON, text, or `ArrayBuffer` based on response content type
+6. **Create handler** — based on detected operation type:
+   - **QUERY / MUTATION**: auto-generated `OperationHandler` (async function) that:
+     - Interpolates path parameters into the URL
+     - Passes query parameters as search params
+     - Sends request body as JSON
+     - Applies auth headers from config
+     - Returns JSON, text, or `ArrayBuffer` based on response content type
+     - Wraps result in `httpEnvelope()` with HTTP metadata
+   - **SUBSCRIPTION**: auto-generated `SubscriptionHandler` (AsyncGenerator) that:
+     - Calls `fetch()` with the constructed URL/params
+     - Reads the response body as a `ReadableStream`
+     - Parses SSE frames (`data:`, `event:`, `id:` fields per WHATWG specification)
+     - Yields each parsed event wrapped in `httpEnvelope()` with `contentType: "text/event-stream"`
+     - Closes the stream on iteration stop or error (in `finally` block)
+     - Throws `CallError("EXECUTION_ERROR", ...)` on HTTP error status or connection errors
 
 The handler wraps results in `httpEnvelope()` with HTTP metadata (status code, headers, content type). On HTTP error status, it throws `CallError("EXECUTION_ERROR", ...)`. `Value.Cast()` normalization against `outputSchema` is applied by `registry.execute()` and `CallHandler` as part of the shared result pipeline — see [response-envelopes.md](response-envelopes.md#shared-result-pipeline).
 
@@ -88,7 +97,7 @@ async function FromOpenAPIFile(
   path: string,
   config: HTTPServiceConfig,
   fs?: OpenAPIFS,
-): Promise<Array<OperationSpec & { handler: OperationHandler }>>
+): Promise<Array<OperationSpec & { handler: OperationHandler | SubscriptionHandler }>>
 ```
 
 Reads an OpenAPI JSON file. If `fs` is provided, uses `fs.readFile()` (runtime-agnostic). Otherwise, uses Node.js `node:fs/promises`.
@@ -99,7 +108,7 @@ Reads an OpenAPI JSON file. If `fs` is provided, uses `fs.readFile()` (runtime-a
 async function FromOpenAPIUrl(
   url: string,
   config: HTTPServiceConfig,
-): Promise<Array<OperationSpec & { handler: OperationHandler }>>
+): Promise<Array<OperationSpec & { handler: OperationHandler | SubscriptionHandler }>>
 ```
 
 Fetches an OpenAPI JSON spec from a URL.
@@ -136,14 +145,94 @@ interface OpenAPIFS {
 
 Injectable filesystem interface for runtime-agnostic file reading. See [ADR-002](decisions/002-fs-injection.md).
 
-### Known Gap: SSE Subscription Handlers
+### SSE Subscription Handlers
 
-`FromOpenAPI` correctly detects SSE endpoints (`text/event-stream` → `SUBSCRIPTION`) but the auto-generated handler does a one-shot `fetch` and returns the response body. For `SUBSCRIPTION` operations, the handler should be an async generator that:
-1. Calls `fetch()` with the constructed URL/params
-2. Reads the response body as a stream
-3. Parses SSE frames (`data:` lines, `event:` lines)
-4. Yields each parsed event
-5. Cleans up on iteration stop
+`FromOpenAPI` detects SSE endpoints by response content type (`text/event-stream` → `SUBSCRIPTION`) and generates an `AsyncGenerator` handler (not a single-return `OperationHandler`). This makes SSE operations consumable via `subscribe()` and compatible with the call protocol's subscription transport.
+
+#### Handler Pattern
+
+For `SUBSCRIPTION`-type operations, `createHTTPOperation` generates a `SubscriptionHandler` — an `AsyncGenerator` that:
+
+1. Calls `fetch()` with the constructed URL, query params, headers (including auth)
+2. Reads the response body as a `ReadableStream`
+3. Parses SSE frames from the stream (`data:`, `event:`, `id:` fields per the [SSE specification](https://html.spec.whatwg.org/multipage/server-sent-events.html))
+4. Yields each parsed event, wrapped in `httpEnvelope()`
+5. Cleans up the stream and response on iteration stop or error
+
+#### SSE Parsing
+
+SSE frames are parsed from the text stream according to the [WHATWG specification](https://html.spec.whatwg.org/multipage/server-sent-events.html):
+
+- **BOM**: A U+FEFF BYTE ORDER MARK at the start of the stream is ignored (per spec §9.2)
+- **Line endings**: Lines are split on `\n`, `\r\n`, or `\r` — all three are valid SSE line terminators
+- **`data:` lines**: The text after `data:` is appended to the current data buffer. If the text after `data:` starts with a single U+0020 SPACE character, that space is removed (per the spec's "remove U+0020" step). Multiple `data:` lines before a dispatch are joined with `\n`
+- **`event:` lines**: Set the event type for the next dispatch (default: `"message"` if no `event:` line)
+- **`id:` lines**: Set the last event ID for reconnection
+- **`:` lines**: Comments, ignored
+- **Empty line**: Dispatches the buffered event (data buffer + event type + last event ID) and resets the parser state
+- **Partial lines across `read()` calls**: The parser must retain unprocessed text in a buffer and prepend it to the next chunk. The SSE stream is a continuous text stream; line boundaries don't align with `ReadableStream.read()` boundaries
+
+Parsing function signature:
+
+```ts
+function parseSSEFrames(buffer: string): { events: SSEEvent[], remaining: string }
+```
+
+Where `SSEEvent` is:
+
+```ts
+interface SSEEvent {
+  data: string    // Joined data fields
+  eventType: string  // From "event:" line, default "message"
+  lastEventId: string  // From "id:" line
+}
+```
+
+The `data` field value is the raw joined string (typically JSON). Consumers decide whether to `JSON.parse()` based on the operation's `outputSchema` or content type heuristics.
+
+**Error handling**: Malformed lines (e.g., lines with no recognized field prefix) are logged as warnings and skipped. The stream continues processing subsequent lines.
+
+Each dispatched event yields:
+
+```ts
+yield httpEnvelope(parsedData, {
+  statusCode: response.status,
+  headers: responseHeaders,
+  contentType: "text/event-stream",
+})
+```
+
+The SSE `event` type and `id` fields are currently **dropped** by the parser — they are not carried in the `ResponseEnvelope`. The `data` field value (the parsed SSE data, typically JSON) is the primary `envelope.data` payload. If consumers need per-event SSE metadata (event type, last event ID), a future `SSEResponseMeta` source type can be added. See [ADR-007](decisions/007-subscription-transport.md) § Open Questions.
+
+#### SSE vs Single-Return Handler
+
+| Aspect | QUERY / MUTATION handler | SUBSCRIPTION handler |
+|--------|-------------------------|---------------------|
+| Type | `OperationHandler` (returns single value) | `SubscriptionHandler` (AsyncGenerator) |
+| Fetch pattern | One request, one response | One request, stream response body |
+| Return value | `httpEnvelope(data, meta)` per call | `httpEnvelope(data, meta)` per yield |
+| `execute()` | Returns `Promise<ResponseEnvelope>` | Not called via `execute()` — use `subscribe()` |
+| Cleanup | Automatic (response consumed) | Must close `ReadableStream` on iteration stop |
+
+#### Error Handling
+
+- **Connection errors** (DNS, timeout): throw `CallError("EXECUTION_ERROR", ...)` from the generator body before the first yield
+- **HTTP error status**: throw `CallError("EXECUTION_ERROR", ...)` from the generator body
+- **Stream parse errors**: log warning and skip the malformed frame, continue the stream
+- **Consumer cancellation**: the generator's `finally` block closes the `ReadableStream` and releases resources
+
+#### Relationship to Call Protocol Subscriptions
+
+SSE operations registered via `FromOpenAPI` are consumable through both:
+
+1. **In-process**: `subscribe(registry, operationId, input, context)` — calls the AsyncGenerator directly, yields `ResponseEnvelope` per SSE event
+2. **Remote**: `PendingRequestMap.subscribe(operationId, input, options)` — publishes `call.requested` and yields each `call.responded` event over the configured transport (WebSocket, Redis, etc.)
+
+The handler itself is transport-agnostic. It yields `ResponseEnvelope` values via `httpEnvelope()`. The subscription consumption layer (local `subscribe()` or remote `PendingRequestMap.subscribe()`) handles the routing.
+
+#### Runtime-Agnostic Fetch
+
+The handler uses the global `fetch()` API, which is available in Node.js (18+), Deno, Bun, and modern browsers. No platform-specific `http` module is imported. For runtimes that require a polyfill, the consumer can set `globalThis.fetch` before calling `FromOpenAPI`.
 
 ## from_mcp
 

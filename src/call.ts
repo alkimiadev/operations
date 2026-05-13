@@ -2,7 +2,7 @@ import { Type, type Static } from "@alkdev/typebox";
 import { createPubSub, type PubSub } from "@alkdev/pubsub";
 import { OperationRegistry } from "./registry.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
-import { ResponseEnvelopeSchema } from "./response-envelope.js";
+import { ResponseEnvelopeSchema, isResponseEnvelope } from "./response-envelope.js";
 import type { ResponseEnvelope } from "./response-envelope.js";
 import type { Identity, OperationContext, AccessControl } from "./types.js";
 
@@ -229,10 +229,3 @@ export function checkAccess(accessControl: AccessControl, identity: Identity): b
   return true;
 }
 
-function isResponseEnvelope(value: unknown): value is ResponseEnvelope {
-  if (typeof value !== "object" || value === null) return false;
-  const obj = value as Record<string, unknown>;
-  if (!("data" in obj) || !("meta" in obj)) return false;
-  if (typeof obj.meta !== "object" || obj.meta === null) return false;
-  return ["local", "http", "mcp"].includes((obj.meta as Record<string, unknown>).source as string);
-}
