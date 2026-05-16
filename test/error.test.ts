@@ -50,6 +50,20 @@ describe("mapError", () => {
     expect(result.code).toBe("NOT_FOUND");
   });
 
+  it("does not false-positive on substring match (ITEM_NOT_FOUND vs NOT_FOUND)", () => {
+    const result = mapError(new Error("ITEM_NOT_FOUND: nope"), [
+      { code: "NOT_FOUND", schema: {} },
+    ]);
+    expect(result.code).toBe(InfrastructureErrorCode.EXECUTION_ERROR);
+  });
+
+  it("matches exact code equality", () => {
+    const result = mapError(new Error("NOT_FOUND"), [
+      { code: "NOT_FOUND", schema: {} },
+    ]);
+    expect(result.code).toBe("NOT_FOUND");
+  });
+
   it("maps non-Error to UNKNOWN_ERROR", () => {
     const result = mapError("string error");
     expect(result.code).toBe(InfrastructureErrorCode.UNKNOWN_ERROR);

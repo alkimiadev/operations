@@ -92,8 +92,9 @@ describe("buildEnv", () => {
   it("filters out SUBSCRIPTION operations", () => {
     const registry = new OperationRegistry();
     registry.register(makeOperation("query"));
+    async function* subHandler(input: any) { yield { result: input.value }; }
     registry.register({
-      ...makeOperation("onEvent"),
+      ...makeOperation("onEvent", subHandler),
       type: OperationType.SUBSCRIPTION,
     });
 

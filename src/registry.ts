@@ -1,3 +1,4 @@
+import { OperationType } from "./types.js";
 import type { OperationContext, OperationSpec, OperationHandler, SubscriptionHandler, Identity, AccessControl } from "./types.js";
 import { getLogger } from "@logtape/logtape";
 import { Value } from "@alkdev/typebox/value";
@@ -40,6 +41,7 @@ export class OperationRegistry {
     const resolvedSpec: OperationSpec = { ...spec, inputSchema, outputSchema };
     this.specs.set(id, resolvedSpec);
     if (handler) {
+      this.validateSubscriptionHandler(id, handler);
       this.handlers.set(id, handler);
     }
     logger.info(`Registered operation: ${id}`);
@@ -60,10 +62,23 @@ export class OperationRegistry {
     logger.info(`Registered spec: ${id}`);
   }
 
+  private validateSubscriptionHandler(id: string, handler: OperationHandler | SubscriptionHandler): void {
+    const spec = this.specs.get(id)!;
+    if (spec.type === OperationType.SUBSCRIPTION) {
+      const tag = Object.prototype.toString.call(handler);
+      if (tag !== '[object AsyncGeneratorFunction]') {
+        throw new Error(
+          `Handler for SUBSCRIPTION operation "${id}" must be an async generator function (async function*), but got ${tag}`,
+        );
+      }
+    }
+  }
+
   registerHandler(id: string, handler: OperationHandler | SubscriptionHandler): void {
     if (!this.specs.has(id)) {
       throw new Error(`Cannot register handler for unknown operation: ${id}`);
     }
+    this.validateSubscriptionHandler(id, handler);
     this.handlers.set(id, handler);
     logger.info(`Registered handler: ${id}`);
   }

@@ -5,9 +5,24 @@ import { Value } from "@alkdev/typebox/value";
 import { FromSchema } from "./from_schema.js";
 import { mcpEnvelope, type MCPContentBlock, type MCPAnnotations, type MCPResourceContent, type MCPResponseMeta } from "./response-envelope.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
+import { OperationRegistry } from "./registry.js";
 import { getLogger } from "@logtape/logtape";
 
 const logger = getLogger("operations:mcp");
+
+interface MCPClientLike {
+  connect(transport: unknown): Promise<void>;
+  listTools(): Promise<{ tools: Array<{ name: string; description?: string; inputSchema: unknown; outputSchema?: unknown }> }>;
+  callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<MCPToolResult>;
+  close(): Promise<void>;
+}
+
+interface MCPToolResult {
+  isError: boolean;
+  content: unknown[];
+  structuredContent?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+}
 
 export interface MCPClientConfig {
   command?: string;
@@ -21,7 +36,7 @@ export interface MCPClientConfig {
 
 export interface MCPClientWrapper {
   name: string;
-  client: unknown;
+  client: MCPClientLike;
   tools: Array<OperationSpec & { handler: OperationHandler }>;
 }
 
@@ -87,16 +102,16 @@ export async function createMCPClient(
   logger.info(`Creating MCP client for: ${name}`);
 
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-  const client = new Client({ name: `alkdev-${name}`, version: "1.0.0" });
+  const client = new Client({ name: `alkdev-${name}`, version: "1.0.0" }) as unknown as MCPClientLike;
 
-  let transport: any;
+  let transport: { connect(client: unknown): Promise<void> } | undefined;
 
   if (config.url) {
     const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
     const url = new URL(config.url);
     transport = new StreamableHTTPClientTransport(url, {
       requestInit: config.headers ? { headers: config.headers } : undefined,
-    });
+    }) as unknown as { connect(client: unknown): Promise<void> };
   } else if (config.command) {
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
     transport = new StdioClientTransport({
@@ -104,7 +119,7 @@ export async function createMCPClient(
       args: config.args || [],
       env: config.env as Record<string, string> | undefined,
       cwd: config.cwd,
-    });
+    }) as unknown as { connect(client: unknown): Promise<void> };
   } else {
     throw new CallError(InfrastructureErrorCode.EXECUTION_ERROR, `Invalid MCP server config for ${name}: must have either 'url' or 'command'`);
   }
@@ -113,7 +128,7 @@ export async function createMCPClient(
   logger.info(`Connected to MCP server: ${name}`);
 
   const toolsResult = await client.listTools();
-  const operations: Array<OperationSpec & { handler: OperationHandler }> = toolsResult.tools.map((tool: { name: string; description?: string; inputSchema: unknown; outputSchema?: unknown }) => {
+  const operations: Array<OperationSpec & { handler: OperationHandler }> = toolsResult.tools.map((tool) => {
     const outputSchema: TSchema = tool.outputSchema
       ? FromSchema(tool.outputSchema) as TSchema
       : Type.Unknown();
@@ -145,7 +160,7 @@ export async function createMCPClient(
           );
         }
 
-        const structuredContent = (result as any).structuredContent as Record<string, unknown> | undefined;
+        const structuredContent = result.structuredContent;
         const contentBlocks = Array.isArray(result.content) ? result.content : [];
 
         const isUnknownOutputSchema = outputSchema[Kind] === "Unknown" || (typeof outputSchema === "object" && Object.keys(outputSchema).filter(k => typeof k === "string").length === 0);
@@ -163,8 +178,8 @@ export async function createMCPClient(
         if (structuredContent != null) {
           meta.structuredContent = structuredContent;
         }
-        if ((result as any)._meta != null) {
-          meta._meta = (result as any)._meta as Record<string, unknown>;
+        if (result._meta != null) {
+          meta._meta = result._meta;
         }
 
         return mcpEnvelope(data, meta);
@@ -181,7 +196,7 @@ export async function createMCPClient(
 
 export async function closeMCPClient(wrapper: MCPClientWrapper): Promise<void> {
   logger.info(`Closing MCP client: ${wrapper.name}`);
-  const client = wrapper.client as any;
+  const { client } = wrapper;
   if (client && typeof client.close === "function") {
     await client.close();
   }
@@ -225,6 +240,12 @@ export class MCPClientLoader {
       }
     }
     return allOps;
+  }
+
+  registerAll(registry: OperationRegistry): void {
+    for (const op of this.getAllOperations()) {
+      registry.register(op);
+    }
   }
 
   async closeAll(): Promise<void> {

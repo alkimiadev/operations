@@ -36,6 +36,16 @@
         "types": "./dist/from-typemap.d.cts",
         "default": "./dist/from-typemap.cjs"
       }
+    },
+    "./from-openapi": {
+      "import": {
+        "types": "./dist/from-openapi.d.ts",
+        "default": "./dist/from-openapi.js"
+      },
+      "require": {
+        "types": "./dist/from-openapi.d.cts",
+        "default": "./dist/from-openapi.cjs"
+      }
     }
   },
   "publishConfig": {

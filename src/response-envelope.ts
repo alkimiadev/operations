@@ -134,7 +134,18 @@ export function isResponseEnvelope(value: unknown): value is ResponseEnvelope {
   const obj = value as Record<string, unknown>
   if (!("data" in obj) || !("meta" in obj)) return false
   if (typeof obj.meta !== "object" || obj.meta === null) return false
-  return RESPONSE_SOURCES.includes((obj.meta as ResponseMeta).source as ResponseSource)
+  const meta = obj.meta as Record<string, unknown>
+  if (!RESPONSE_SOURCES.includes(meta.source as ResponseSource)) return false
+  switch (meta.source) {
+    case "local":
+      return typeof meta.operationId === "string" && typeof meta.timestamp === "number"
+    case "http":
+      return typeof meta.statusCode === "number"
+    case "mcp":
+      return typeof meta.isError === "boolean" && Array.isArray(meta.content)
+    default:
+      return false
+  }
 }
 
 export function localEnvelope<T>(data: T, operationId: string): ResponseEnvelope<T> {

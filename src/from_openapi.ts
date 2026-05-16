@@ -3,6 +3,7 @@ import { FromSchema } from "./from_schema.js";
 import { OperationType, type OperationSpec, type OperationHandler, type SubscriptionHandler, type OperationContext } from "./types.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
 import { httpEnvelope } from "./response-envelope.js";
+import { OperationRegistry } from "./registry.js";
 
 export interface OpenAPIFS {
   readFile(path: string): Promise<string>;
@@ -49,6 +50,7 @@ export interface HTTPServiceConfig {
     prefix?: string;
   };
   timeout?: number;
+  fetch?: typeof globalThis.fetch;
 }
 
 export interface SSEEvent {
@@ -323,6 +325,7 @@ function createHTTPOperation(
   const opType = detectOperationType(method, operation);
   const apiVersion = spec.info?.version || "1.0.0";
   const authHeaders = getAuthHeaders(config);
+  const httpClient = config.fetch ?? globalThis.fetch.bind(globalThis);
   const responseHeaders = (): Record<string, string> => ({ ...authHeaders, "Content-Type": "application/json" });
 
   if (opType === OperationType.SUBSCRIPTION) {
@@ -336,7 +339,6 @@ function createHTTPOperation(
         if (path.includes(`{${key}}`)) {
           urlPath = urlPath.replace(`{${key}}`, encodeURIComponent(String(value)));
         } else if (key === "body") {
-          // body not typically used for SSE GET, but supported
         } else {
           queryParams[key] = String(value);
         }
@@ -352,7 +354,7 @@ function createHTTPOperation(
         "Accept": "text/event-stream",
       };
 
-      const response = await fetch(url.toString(), {
+      const response = await httpClient(url.toString(), {
         method: method.toUpperCase(),
         headers,
         signal: config.timeout ? AbortSignal.timeout(config.timeout) : undefined,
@@ -442,7 +444,7 @@ function createHTTPOperation(
       "Content-Type": "application/json",
     };
 
-    const response = await fetch(url.toString(), {
+    const response = await httpClient(url.toString(), {
       method: method.toUpperCase(),
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -531,7 +533,56 @@ export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, f
 }
 
 export async function FromOpenAPIUrl(url: string, config: HTTPServiceConfig): Promise<Array<OperationSpec & { handler: HTTPOperationHandler }>> {
-  const response = await fetch(url);
+  const httpClient = config.fetch ?? globalThis.fetch.bind(globalThis);
+  const response = await httpClient(url);
   const spec = await response.json() as OpenAPISpec;
   return FromOpenAPI(spec, config);
+}
+
+export class OpenAPIServiceRegistry {
+  private services: Map<string, { config: HTTPServiceConfig; operations: Array<OperationSpec & { handler: HTTPOperationHandler }> }> = new Map();
+
+  add(name: string, spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: HTTPOperationHandler }> {
+    const operations = FromOpenAPI(spec, config);
+    this.services.set(name, { config, operations });
+    return operations;
+  }
+
+  async addFromFile(name: string, path: string, config: HTTPServiceConfig, fs?: OpenAPIFS): Promise<Array<OperationSpec & { handler: HTTPOperationHandler }>> {
+    const operations = await FromOpenAPIFile(path, config, fs);
+    this.services.set(name, { config, operations });
+    return operations;
+  }
+
+  async addFromUrl(name: string, url: string, config: HTTPServiceConfig): Promise<Array<OperationSpec & { handler: HTTPOperationHandler }>> {
+    const operations = await FromOpenAPIUrl(url, config);
+    this.services.set(name, { config, operations });
+    return operations;
+  }
+
+  get(name: string): Array<OperationSpec & { handler: HTTPOperationHandler }> | undefined {
+    return this.services.get(name)?.operations;
+  }
+
+  getAll(): Array<OperationSpec & { handler: HTTPOperationHandler }> {
+    const all: Array<OperationSpec & { handler: HTTPOperationHandler }> = [];
+    for (const { operations } of this.services.values()) {
+      all.push(...operations);
+    }
+    return all;
+  }
+
+  remove(name: string): boolean {
+    return this.services.delete(name);
+  }
+
+  registerAll(registry: OperationRegistry): void {
+    for (const { operations } of this.services.values()) {
+      registry.registerAll(operations);
+    }
+  }
+
+  get size(): number {
+    return this.services.size;
+  }
 }

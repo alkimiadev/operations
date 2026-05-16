@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Scope:** Full codebase review for issues that would impact downstream hub/spoke implementations
-**Status:** C-01 through C-05, H-01 through H-06, and M-03 resolved. M-01 through M-02 and M-04 through M-08, plus L-01 through L-05, remain as follow-ups.
+**Status:** C-01 through C-05, H-01 through H-06, M-01 through M-03, M-05 through M-08, and L-01 through L-05 resolved. M-04 (call.completed signaling) and L-04 (SSE GET requestBody) deferred. M-02 resolved (subpath export added, OpenAPI re-exported from main entry removed).
 
 ---
 
@@ -106,15 +106,17 @@ Both adapters have access to version information (MCP server info, OpenAPI `info
 
 ## Medium (fix in follow-up)
 
-### M-01. Duplicate OperationDefinitionSchema vs OperationSpecSchema
+### M-01. Duplicate OperationDefinitionSchema vs OperationSpecSchema ✅ RESOLVED
 
-**File:** `src/types.ts:83-101` vs `121-138`
+**File:** `src/types.ts`
 
-These two schemas are nearly identical, differing only in the `handler` field. Any field added to one must be added to the other. They should be composed (e.g., OperationDefinitionSchema extends OperationSpecSchema + handler).
+**Resolution:** `OperationDefinitionSchema` now composes from `OperationSpecSchema` via `Type.Intersect([OperationSpecSchema, Type.Object({ handler: ... })])` instead of duplicating all fields. `OperationSpecSchema` is the single source of truth.
 
-### M-02. No subpath export for from_openapi
+### M-02. No subpath export for from_openapi ✅ RESOLVED
 
-**File:** `package.json` exports only `./from-mcp` and `./from-typemap` as subpath entries. `from_openapi.ts` is bundled into the main entry, meaning anyone importing `PendingRequestMap` or `OperationRegistry` also pulls in the OpenAPI adapter code (including `fetch` usage and `node:fs/promises` import). This should be a separate subpath export for tree-shaking.
+**File:** `package.json`, `tsup.config.ts`, `src/index.ts`
+
+**Resolution:** Added `./from-openapi` subpath export in `package.json` and `tsup.config.ts`. Removed `from_openapi` re-exports from `src/index.ts` so it's only available via `@alkdev/operations/from-openapi`.
 
 ### M-03. Subscription deadline semantics are ambiguous ✅ RESOLVED
 
@@ -131,58 +133,56 @@ These two schemas are nearly identical, differing only in the `handler` field. A
 
 **File:** `src/call.ts:298-301`
 
+**Status:** DEFERRED — will be implemented in a dedicated session due to protocol-level impact.
+
 When a subscription ends (the `for await` loop completes), `buildCallHandler` simply stops calling `callMap.respond()`. There is no `call.completed` or `call.finished` event type to explicitly signal subscription completion. The consumer must detect iterator completion, which works with `Repeater` but may not work with all pubsub implementations.
 
-### M-05. mapError uses fragile message.includes(code) matching
+### M-05. mapError uses fragile message.includes(code) matching ✅ RESOLVED
 
-**File:** `src/error.ts:37-41`
+**File:** `src/error.ts`
 
-Error matching against `errorSchemas` uses `message.includes(schema.code)`, which can match incorrectly (e.g., `"ITEM_NOT_FOUND"` matches `NOT_FOUND`). Should use exact prefix/suffix matching or a structured error code protocol.
+**Resolution:** Changed `message.includes(schema.code)` to `message.startsWith(schema.code + ":") || message === schema.code`. This prevents false positives like `"ITEM_NOT_FOUND"` matching `NOT_FOUND` while preserving the existing `"CODE: message"` pattern.
 
-### M-06. from_mcp.ts uses multiple `any` casts
+### M-06. from_mcp.ts uses multiple `any` casts ✅ RESOLVED
 
-**File:** `src/from_mcp.ts:91, 115, 137, 155-156, 173`
+**File:** `src/from_mcp.ts`
 
-Five `any` casts in the MCP adapter. If the MCP SDK types change, these will silently break at runtime. Should use narrow type assertions or import the actual SDK types.
+**Resolution:** Replaced all `any` casts with narrow inline interfaces (`MCPClientLike`, `MCPToolResult`). Client is now typed as `MCPClientLike` instead of `unknown`. Transport uses a structural type. `result.structuredContent` and `result._meta` accessed via `MCPToolResult` interface.
 
-### M-07. No injectable HTTP client for from_openapi
+### M-07. No injectable HTTP client for from_openapi ✅ RESOLVED
 
-**File:** `src/from_openapi.ts:354, 444, 527`
+**File:** `src/from_openapi.ts`
 
-All HTTP operations use the global `fetch()` API with no way to inject a custom HTTP client. Hub/spoke implementations running in constrained environments (custom proxy, no direct network, test mocking) cannot override the transport. Should accept an optional `fetch` parameter in `HTTPServiceConfig`.
+**Resolution:** Added optional `fetch` property to `HTTPServiceConfig`. All three `fetch()` call sites (SSE handler, regular handler, `FromOpenAPIUrl`) now use `config.fetch ?? globalThis.fetch.bind(globalThis)`. Allows custom HTTP clients, proxy injection, and test mocking.
 
-### M-08. No cleanup/disconnect for OpenAPI adapter
+### M-08. No cleanup/disconnect for OpenAPI adapter ✅ RESOLVED
 
-Unlike `MCPClientLoader.closeAll()`, there is no cleanup path for OpenAPI HTTP connections. Long-running hub processes that dynamically add/remove OpenAPI services may leak resources.
+**File:** `src/from_openapi.ts`
+
+**Resolution:** Added `OpenAPIServiceRegistry` class with `add()`, `addFromFile()`, `addFromUrl()`, `get()`, `getAll()`, `remove()`, `registerAll(registry)`, and `size` — mirroring `MCPClientLoader` API pattern. Provides lifecycle management for dynamically added/removed OpenAPI services.
 
 ---
 
 ## Low (tech debt, nice-to-fix)
 
-### L-01. subscribe() casts handler return as AsyncGenerator without validation
+### L-01. subscribe() casts handler return as AsyncGenerator without validation ✅ RESOLVED
 
-**File:** `src/subscribe.ts:53`
+**Resolution:** Added validation in `registry.registerHandler()` and `registry.register()` that checks if SUBSCRIPTION operations have async generator handlers (using `Object.prototype.toString.call()`). Also added runtime check in `subscribe()` that verifies the handler result is an async iterable before the `for await` loop, throwing a clear `CallError` if not.
 
-`handler(input, context) as AsyncGenerator` bypasses runtime type checking. If someone registers a regular async function (not a generator) for a SUBSCRIPTION operation, this fails at iteration time with a confusing error. Should validate at registration time that subscription operations have a `SubscriptionHandler`.
+### L-02. isResponseEnvelope type guard is lenient ✅ RESOLVED
 
-### L-02. isResponseEnvelope type guard is lenient
+**Resolution:** Added source-specific validation: `local` checks `operationId` (string) and `timestamp` (number); `http` checks `statusCode` (number); `mcp` checks `isError` (boolean) and `content` (array). Prevents malformed envelopes from passing through.
 
-**File:** `src/response-envelope.ts:132-138`
+### L-03. from_schema.ts FromSchema returns Type.Unknown for unrecognized input ✅ RESOLVED
 
-Checks for `data` and `meta.source` but doesn't validate `meta.operationId`, `meta.timestamp`, or the structure of `data`. A hub checking `isResponseEnvelope()` could pass malformed data through.
-
-### L-03. from_schema.ts FromSchema returns Type.Unknown for unrecognized input
-
-**File:** `src/from_schema.ts:114`
-
-An empty object `{}` silently becomes `Type.Unknown({})`, which validates anything. Should at minimum log a warning.
+**Resolution:** Added `logger.warn()` call when the fallback `Type.Unknown()` is reached, logging the unrecognized schema via `JSON.stringify()`. Uses `@logtape/logtape` with category `"operations:from_schema"`, matching the existing pattern.
 
 ### L-04. from_openapi.ts SSE GET includes requestBody handling
 
-**File:** `src/from_openapi.ts:329, 341`
+**File:** `src/from_openapi.ts`
 
-GET-based SSE subscriptions include body parameter handling, which is unusual for SSE. This is noted in a comment but not addressed.
+**Status:** NOTED — The `else if (key === "body")` branch in the SSE handler silently accepts but does not forward body parameters. This is intentional for unusual SSE-over-POST use cases. No action needed; the behavior is self-documenting from the code structure.
 
-### L-05. No convenience registerAll methods on MCP or OpenAPI adapters
+### L-05. No convenience registerAll methods on MCP or OpenAPI adapters ✅ RESOLVED
 
-`MCPClientLoader` has `getAllOperations()` but no `registerAll(registry)`. `FromOpenAPI` returns a plain array with no helper. Consumers must iterate manually. Minor ergonomics issue.
+**Resolution:** Added `registerAll(registry)` method to `MCPClientLoader`. Added `OpenAPIServiceRegistry` class (M-08) with `registerAll(registry)`, `add()`, `addFromFile()`, `addFromUrl()`, `get()`, `getAll()`, `remove()`, and `size`.

@@ -77,7 +77,7 @@ export type SubscriptionHandler<
   context: TContext,
 ) => AsyncGenerator<TOutput, void, unknown>;
 
-export const OperationDefinitionSchema = Type.Object({
+export const OperationSpecSchema = Type.Object({
   name: Type.String({ description: "Unique operation name" }),
   namespace: Type.String({
     description: "Namespace for grouping (e.g., 'task', 'graph', 'user')",
@@ -93,7 +93,6 @@ export const OperationDefinitionSchema = Type.Object({
   outputSchema: Type.Unknown({ description: "json schema for output" }),
   errorSchemas: Type.Optional(Type.Array(ErrorDefinitionSchema)),
   accessControl: AccessControlSchema,
-  handler: Type.Unknown({ description: "Operation handler function" }),
   _meta: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });
 
@@ -115,24 +114,12 @@ export interface OperationSpec<
   _meta?: Record<string, unknown>;
 }
 
-export const OperationSpecSchema = Type.Object({
-  name: Type.String({ description: "Unique operation name" }),
-  namespace: Type.String({
-    description: "Namespace for grouping (e.g., 'task', 'graph', 'user')",
+export const OperationDefinitionSchema = Type.Intersect([
+  OperationSpecSchema,
+  Type.Object({
+    handler: Type.Unknown({ description: "Operation handler function" }),
   }),
-  version: Type.String({ description: "Semantic version (e.g., '1.0.0')" }),
-  type: Type.Enum(OperationType, {
-    description: "Operation type: query, mutation, or subscription",
-  }),
-  title: Type.Optional(Type.String({ description: "Human-readable title" })),
-  description: Type.String({ description: "Detailed description" }),
-  tags: Type.Optional(Type.Array(Type.String())),
-  inputSchema: Type.Unknown({ description: "json schema for input" }),
-  outputSchema: Type.Unknown({ description: "json schema for output" }),
-  errorSchemas: Type.Optional(Type.Array(ErrorDefinitionSchema)),
-  accessControl: AccessControlSchema,
-  _meta: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-});
+]);
 
 export interface IOperationDefinition<
   TInput = unknown,

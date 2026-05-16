@@ -35,7 +35,17 @@ export async function* subscribe(
 
   validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);
 
-  const generator = handler(input, context) as AsyncGenerator<unknown, void, unknown>;
+  const result: unknown = handler(input, context);
+
+  if (result == null || typeof (result as Record<symbol, unknown>)[Symbol.asyncIterator] !== "function") {
+    throw new CallError(
+      InfrastructureErrorCode.EXECUTION_ERROR,
+      `Subscription handler for "${operationId}" must return an async iterable (async generator), but got ${result === null ? "null" : typeof result}`,
+      { operationId },
+    );
+  }
+
+  const generator = result as AsyncGenerator<unknown, void, unknown>;
 
   try {
     for await (const value of generator) {

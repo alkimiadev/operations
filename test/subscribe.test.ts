@@ -380,4 +380,85 @@ describe("subscribe", () => {
     expect(results).toHaveLength(1);
     expect(results[0].data).toBe("secret-event");
   });
+
+  it("throws CallError when handler returns a non-async-iterable (plain async function)", async () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "badSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "bad sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    const plainAsyncFn = async (_input: unknown, _context: OperationContext) => "not a generator";
+    (registry as any).handlers.set("test.badSub", plainAsyncFn);
+
+    try {
+      for await (const _ of subscribe(registry, "test.badSub", {}, makeContext())) {
+        expect.fail("Should have thrown");
+      }
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.EXECUTION_ERROR);
+      expect((error as CallError).message).toContain("must return an async iterable");
+    }
+  });
+
+  it("throws CallError when handler returns null", async () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "nullSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "null sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    const nullFn = (_input: unknown, _context: OperationContext): any => null;
+    (registry as any).handlers.set("test.nullSub", nullFn);
+
+    try {
+      for await (const _ of subscribe(registry, "test.nullSub", {}, makeContext())) {
+        expect.fail("Should have thrown");
+      }
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.EXECUTION_ERROR);
+      expect((error as CallError).message).toContain("must return an async iterable");
+    }
+  });
+
+  it("throws CallError when handler returns a plain object (non-iterable)", async () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "objSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "obj sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    const objFn = (_input: unknown, _context: OperationContext): any => ({ not: "iterable" });
+    (registry as any).handlers.set("test.objSub", objFn);
+
+    try {
+      for await (const _ of subscribe(registry, "test.objSub", {}, makeContext())) {
+        expect.fail("Should have thrown");
+      }
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.EXECUTION_ERROR);
+      expect((error as CallError).message).toContain("must return an async iterable");
+    }
+  });
 });

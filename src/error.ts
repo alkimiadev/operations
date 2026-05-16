@@ -34,7 +34,7 @@ export function mapError(
     if (errorSchemas) {
       const message = error.message;
       for (const schema of errorSchemas) {
-        if (message.includes(schema.code)) {
+        if (message.startsWith(schema.code + ":") || message === schema.code) {
           return new CallError(schema.code, message, error);
         }
       }

@@ -240,6 +240,46 @@ describe("isResponseEnvelope", () => {
   it("returns false for object with numeric meta", () => {
     expect(isResponseEnvelope({ data: "hello", meta: 42 })).toBe(false);
   });
+
+  it("returns false for local envelope missing operationId", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "local", timestamp: Date.now() } })).toBe(false);
+  });
+
+  it("returns false for local envelope with non-string operationId", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "local", operationId: 123, timestamp: Date.now() } })).toBe(false);
+  });
+
+  it("returns false for local envelope missing timestamp", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "local", operationId: "op.test" } })).toBe(false);
+  });
+
+  it("returns false for local envelope with non-number timestamp", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "local", operationId: "op.test", timestamp: "now" } })).toBe(false);
+  });
+
+  it("returns false for http envelope missing statusCode", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "http", headers: {}, contentType: "text/plain" } })).toBe(false);
+  });
+
+  it("returns false for http envelope with non-number statusCode", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "http", statusCode: "200", headers: {}, contentType: "text/plain" } })).toBe(false);
+  });
+
+  it("returns false for mcp envelope missing isError", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "mcp", content: [] } })).toBe(false);
+  });
+
+  it("returns false for mcp envelope with non-boolean isError", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "mcp", isError: "true", content: [] } })).toBe(false);
+  });
+
+  it("returns false for mcp envelope missing content", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "mcp", isError: false } })).toBe(false);
+  });
+
+  it("returns false for mcp envelope with non-array content", () => {
+    expect(isResponseEnvelope({ data: "hello", meta: { source: "mcp", isError: true, content: "error" } })).toBe(false);
+  });
 });
 
 describe("unwrap", () => {

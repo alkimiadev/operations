@@ -402,3 +402,111 @@ describe("OperationRegistry access control", () => {
     }
   });
 });
+
+describe("OperationRegistry subscription handler validation", () => {
+  it("rejects non-async-generator handler for SUBSCRIPTION via registerHandler", () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "badSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "bad sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    const regularAsyncFn = async () => "not a generator";
+    expect(() => registry.registerHandler("test.badSub", regularAsyncFn as any)).toThrow(
+      /must be an async generator function/i,
+    );
+  });
+
+  it("rejects synchronous function handler for SUBSCRIPTION via registerHandler", () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "syncSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "sync sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    expect(() => registry.registerHandler("test.syncSub", (() => {}) as any)).toThrow(
+      /must be an async generator function/i,
+    );
+  });
+
+  it("allows async generator function handler for SUBSCRIPTION via registerHandler", () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "goodSub",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "good sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    async function* goodHandler(_input: unknown, _context: any) {
+      yield "event";
+    }
+    expect(() => registry.registerHandler("test.goodSub", goodHandler as any)).not.toThrow();
+  });
+
+  it("rejects non-async-generator handler for SUBSCRIPTION via register", () => {
+    const registry = new OperationRegistry();
+    expect(() =>
+      registry.register({
+        name: "badRegSub",
+        namespace: "test",
+        version: "1.0.0",
+        type: OperationType.SUBSCRIPTION,
+        description: "bad sub via register",
+        inputSchema: Type.Object({}),
+        outputSchema: Type.Unknown(),
+        accessControl: { requiredScopes: [] },
+        handler: async () => "not a generator" as any,
+      }),
+    ).toThrow(/must be an async generator function/i);
+  });
+
+  it("allows async generator handler for SUBSCRIPTION via register", () => {
+    const registry = new OperationRegistry();
+    async function* handler(_input: unknown, _context: any) {
+      yield "event";
+    }
+    expect(() =>
+      registry.register({
+        name: "goodRegSub",
+        namespace: "test",
+        version: "1.0.0",
+        type: OperationType.SUBSCRIPTION,
+        description: "good sub via register",
+        inputSchema: Type.Object({}),
+        outputSchema: Type.Unknown(),
+        accessControl: { requiredScopes: [] },
+        handler,
+      }),
+    ).not.toThrow();
+  });
+
+  it("allows regular async handler for QUERY via registerHandler", () => {
+    const registry = new OperationRegistry();
+    registry.registerSpec({
+      name: "queryOp",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.QUERY,
+      description: "query op",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+    });
+    const handler = async (_input: unknown, _context: any) => ({ result: "ok" });
+    expect(() => registry.registerHandler("test.queryOp", handler as any)).not.toThrow();
+  });
+});

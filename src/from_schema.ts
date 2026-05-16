@@ -1,4 +1,7 @@
 import * as Type from "@alkdev/typebox";
+import { getLogger } from "@logtape/logtape";
+
+const logger = getLogger("operations:from_schema");
 
 const IsExact = (value: unknown, expect: unknown) => value === expect;
 const IsSValue = (value: unknown): value is SValue =>
@@ -111,5 +114,6 @@ export function FromSchema<T>(T: T): Type.TSchema {
   if (IsSInteger(T)) return Type.Integer(T);
   if (IsSBoolean(T)) return Type.Boolean(T);
   if (IsSNull(T)) return Type.Null(T);
+  logger.warn(`Falling back to Type.Unknown for unrecognized schema: ${JSON.stringify(T)}`);
   return Type.Unknown(T || {});
 }

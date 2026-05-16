@@ -5,6 +5,7 @@ export default defineConfig({
     'src/index.ts',
     'src/from_mcp.ts',
     'src/from_typemap.ts',
+    'src/from_openapi.ts',
   ],
   format: ['esm', 'cjs'],
   dts: true,
