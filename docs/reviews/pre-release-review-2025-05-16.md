@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Scope:** Full codebase review for issues that would impact downstream hub/spoke implementations
-**Status:** C-01 through C-05 and H-01 through H-06 resolved. M-01 through M-08 and L-01 through L-05 remain as follow-ups.
+**Status:** C-01 through C-05, H-01 through H-06, and M-03 resolved. M-01 through M-02 and M-04 through M-08, plus L-01 through L-05, remain as follow-ups.
 
 ---
 
@@ -116,11 +116,16 @@ These two schemas are nearly identical, differing only in the `handler` field. A
 
 **File:** `package.json` exports only `./from-mcp` and `./from-typemap` as subpath entries. `from_openapi.ts` is bundled into the main entry, meaning anyone importing `PendingRequestMap` or `OperationRegistry` also pulls in the OpenAPI adapter code (including `fetch` usage and `node:fs/promises` import). This should be a separate subpath export for tree-shaking.
 
-### M-03. Subscription deadline semantics are ambiguous
+### M-03. Subscription deadline semantics are ambiguous ✅ RESOLVED
 
-**File:** `src/call.ts:103-109`
+**File:** `src/call.ts`
 
-When a `call.responded` event arrives for a subscription, the deadline timer is reset to the same `entry.state.deadline` value. If `deadline` is an absolute timestamp (e.g., `Date.now() + 5000`), the new timer delay would be `deadline - Date.now()`, which shrinks over time and could become negative. The documentation doesn't specify whether `deadline` is absolute or relative. This should be clarified and the reset logic adjusted.
+**Resolution:** Split the overloaded `deadline` field into two distinct concepts:
+
+- `deadline` (absolute timestamp, ms since epoch) — used by `call()`. Total time limit for a request/response cycle. Computed as `setTimeout(fn, Math.max(0, deadline - Date.now()))`.
+- `idleTimeout` (relative duration in ms) — used by `subscribe()`. Maximum ms between events before the subscription is considered idle. Reset on each `call.responded` event. Omit for no idle timeout (subscription lives until explicit abort).
+
+`CallRequestedEvent` schema now has both `deadline?: number` and `idleTimeout?: number` as optional fields. `PendingRequestMap.subscribe()` accepts `{ idleTimeout }` instead of `{ deadline }`. The idle timer is correctly reset on each event using the stored `idleTimeout` value.
 
 ### M-04. No unsubscribe/completion signaling in call protocol
 

@@ -956,11 +956,11 @@ describe("PendingRequestMap.subscribe()", () => {
     expect(iterationCompleted).toBe(true);
   });
 
-  it("times out on idle deadline", async () => {
+  it("times out on idle timeout", async () => {
     const map = new PendingRequestMap();
-    const deadline = 80;
+    const idleTimeout = 80;
 
-    const subscribeIter = map.subscribe("test.slow", {}, { deadline });
+    const subscribeIter = map.subscribe("test.slow", {}, { idleTimeout });
     let caughtError: unknown;
 
     const consumePromise = (async () => {
@@ -981,9 +981,9 @@ describe("PendingRequestMap.subscribe()", () => {
 
   it("resets idle timeout on each envelope", async () => {
     const map = new PendingRequestMap();
-    const deadline = 150;
+    const idleTimeout = 150;
 
-    const subscribeIter = map.subscribe("test.heartbeat", {}, { deadline });
+    const subscribeIter = map.subscribe("test.heartbeat", {}, { idleTimeout });
 
     const results: ResponseEnvelope[] = [];
     const consumePromise = (async () => {
@@ -1055,6 +1055,37 @@ describe("PendingRequestMap.subscribe()", () => {
 
     await consumePromise;
     expect(map.getPendingCount()).toBe(0);
+  });
+
+  it("subscribe without idleTimeout never times out", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.persistent", {});
+    let eventCount = 0;
+
+    const consumePromise = (async () => {
+      for await (const _ of subscribeIter) {
+        eventCount++;
+        if (eventCount >= 1) break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 50));
+    const requestId = [...map["entries"].keys()][0];
+    map.respond(requestId, localEnvelope("event", "test.persistent"));
+
+    await consumePromise;
+    expect(eventCount).toBe(1);
+  });
+
+  it("call() with past deadline times out immediately", async () => {
+    const map = new PendingRequestMap();
+
+    const deadline = Date.now() - 100;
+    const callPromise = map.call("test.op", { value: "hello" }, { deadline });
+
+    await expect(callPromise).rejects.toThrow("timed out");
+    await expect(callPromise).rejects.toBeInstanceOf(CallError);
   });
 });
 

@@ -17,7 +17,8 @@ export const CallEventSchema = {
     operationId: Type.String(),
     input: Type.Unknown(),
     parentRequestId: Type.Optional(Type.String()),
-    deadline: Type.Optional(Type.Number()),
+    deadline: Type.Optional(Type.Number({ description: "Absolute timestamp (ms since epoch) for call/response timeout. Used by calls." })),
+    idleTimeout: Type.Optional(Type.Number({ description: "Relative duration (ms) between events before subscription is considered idle. Used by subscriptions. Omit for no idle timeout." })),
     identity: Type.Optional(Type.Object({
       id: Type.String(),
       scopes: Type.Array(Type.String()),
@@ -65,7 +66,7 @@ interface PendingCall {
 interface SubscriptionState {
   push: Push<ResponseEnvelope>;
   stop: Stop;
-  deadline?: number;
+  idleTimeout?: number;
   timer?: ReturnType<typeof setTimeout>;
   consumerStopped?: boolean;
 }
@@ -107,8 +108,8 @@ export class PendingRequestMap {
         } else {
           if (entry.state.timer) {
             clearTimeout(entry.state.timer);
-            if (entry.state.deadline) {
-              entry.state.timer = this.startSubscriptionTimer(responded.requestId, entry.state.deadline);
+            if (entry.state.idleTimeout != null) {
+              entry.state.timer = this.startIdleTimer(responded.requestId, entry.state.idleTimeout);
             }
           }
           entry.state.push(responded.output as ResponseEnvelope);
@@ -163,15 +164,15 @@ export class PendingRequestMap {
     });
   }
 
-  private startSubscriptionTimer(requestId: string, deadline: number): ReturnType<typeof setTimeout> {
+  private startIdleTimer(requestId: string, idleTimeout: number): ReturnType<typeof setTimeout> {
     return setTimeout(() => {
       const entry = this.entries.get(requestId);
       if (!entry || entry.type !== "subscribe") return;
       if (entry.state.timer) clearTimeout(entry.state.timer);
       entry.state.consumerStopped = true;
       this.pubsub.publish("call.aborted", "", { requestId });
-      entry.state.stop(new CallError(InfrastructureErrorCode.TIMEOUT, `Subscription ${requestId} timed out (idle)`, { deadline }));
-    }, deadline);
+      entry.state.stop(new CallError(InfrastructureErrorCode.TIMEOUT, `Subscription ${requestId} timed out (idle after ${idleTimeout}ms)`, { idleTimeout }));
+    }, idleTimeout);
   }
 
   async call(
@@ -186,10 +187,11 @@ export class PendingRequestMap {
 
       if (options?.deadline) {
         pending.deadline = options.deadline;
+        const delay = Math.max(0, options.deadline - Date.now());
         pending.timer = setTimeout(() => {
           this.entries.delete(requestId);
           reject(new CallError(InfrastructureErrorCode.TIMEOUT, `Request ${requestId} timed out`, { deadline: options.deadline }));
-        }, options.deadline - Date.now());
+        }, delay);
       }
 
       this.entries.set(requestId, { type: "call", pending });
@@ -208,16 +210,16 @@ export class PendingRequestMap {
   subscribe(
     operationId: string,
     input: unknown,
-    options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
+    options?: { parentRequestId?: string; idleTimeout?: number; identity?: Identity },
   ): AsyncIterable<ResponseEnvelope> {
     const requestId = crypto.randomUUID();
 
     const repeater = new Repeater<ResponseEnvelope>((push: Push<ResponseEnvelope>, stop: Stop) => {
       const state: SubscriptionState = { push, stop };
 
-      if (options?.deadline) {
-        state.deadline = options.deadline;
-        state.timer = this.startSubscriptionTimer(requestId, options.deadline);
+      if (options?.idleTimeout != null) {
+        state.idleTimeout = options.idleTimeout;
+        state.timer = this.startIdleTimer(requestId, options.idleTimeout);
       }
 
       this.entries.set(requestId, { type: "subscribe", state });
@@ -227,7 +229,7 @@ export class PendingRequestMap {
         operationId,
         input,
         parentRequestId: options?.parentRequestId,
-        deadline: options?.deadline,
+        idleTimeout: options?.idleTimeout,
         identity: options?.identity,
       });
 
