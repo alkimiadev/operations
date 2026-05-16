@@ -6,6 +6,8 @@
 
 **Architecture docs**: [ADR-007](../docs/architecture/decisions/007-subscription-transport.md), [call-protocol.md](../docs/architecture/call-protocol.md), [adapters.md](../docs/architecture/adapters.md)
 
+**Status**: ✅ Completed (2026-05-16)
+
 ## Scope
 
 Three changes, all in source. No new modules needed.

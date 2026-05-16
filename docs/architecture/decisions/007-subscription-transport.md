@@ -1,6 +1,6 @@
 ---
-status: draft
-last_updated: 2026-05-13
+status: accepted
+last_updated: 2026-05-16
 ---
 
 # ADR-007: Subscription Transport for SSE and Remote Streaming

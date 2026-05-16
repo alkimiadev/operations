@@ -26,7 +26,7 @@ describe("PendingRequestMap", () => {
     const callPromise = map.call("test.op", { value: "hello" });
 
     setTimeout(() => {
-      const requestId = [...map["requests"].keys()][0];
+      const requestId = [...map["entries"].keys()][0];
       map.respond(requestId, localEnvelope({ result: "world" }, "test.op"));
     }, 10);
 
@@ -48,7 +48,7 @@ describe("PendingRequestMap", () => {
     });
 
     setTimeout(() => {
-      const requestId = [...map["requests"].keys()][0];
+      const requestId = [...map["entries"].keys()][0];
       map.respond(requestId, envelope);
     }, 10);
 
@@ -71,7 +71,7 @@ describe("PendingRequestMap", () => {
     const callPromise = map.call("test.op", { value: "hello" });
 
     setTimeout(() => {
-      const requestId = [...map["requests"].keys()][0];
+      const requestId = [...map["entries"].keys()][0];
       map.emitError(requestId, "CUSTOM_ERROR", "Something went wrong");
     }, 10);
 
@@ -85,7 +85,7 @@ describe("PendingRequestMap", () => {
     const callPromise = map.call("test.op", { value: "hello" });
 
     setTimeout(() => {
-      const requestId = [...map["requests"].keys()][0];
+      const requestId = [...map["entries"].keys()][0];
       map.abort(requestId);
     }, 10);
 
@@ -115,7 +115,7 @@ describe("PendingRequestMap", () => {
     const callPromise = map.call("test.op", { value: "hello" });
     expect(map.getPendingCount()).toBe(1);
 
-    const requestId = [...map["requests"].keys()][0];
+    const requestId = [...map["entries"].keys()][0];
     map.respond(requestId, localEnvelope({ result: "done" }, "test.op"));
 
     await callPromise;
@@ -146,7 +146,7 @@ describe("PendingRequestMap", () => {
   it("respond() accepts a localEnvelope", () => {
     const map = new PendingRequestMap();
     const callPromise = map.call("test.op", {});
-    const requestId = [...map["requests"].keys()][0];
+    const requestId = [...map["entries"].keys()][0];
 
     expect(() => map.respond(requestId, localEnvelope("data", "test.op"))).not.toThrow();
   });
@@ -154,7 +154,7 @@ describe("PendingRequestMap", () => {
   it("respond() accepts an httpEnvelope", () => {
     const map = new PendingRequestMap();
     const callPromise = map.call("test.op", {});
-    const requestId = [...map["requests"].keys()][0];
+    const requestId = [...map["entries"].keys()][0];
 
     expect(() => map.respond(requestId, httpEnvelope("data", {
       statusCode: 200,
@@ -166,7 +166,7 @@ describe("PendingRequestMap", () => {
   it("respond() accepts an mcpEnvelope", () => {
     const map = new PendingRequestMap();
     const callPromise = map.call("test.op", {});
-    const requestId = [...map["requests"].keys()][0];
+    const requestId = [...map["entries"].keys()][0];
 
     expect(() => map.respond(requestId, mcpEnvelope("data", {
       isError: false,
@@ -180,7 +180,7 @@ describe("PendingRequestMap", () => {
     const callPromise = map.call("test.op", { value: "hello" });
 
     setTimeout(() => {
-      const requestId = [...map["requests"].keys()][0];
+      const requestId = [...map["entries"].keys()][0];
       map.respond(requestId, localEnvelope(42, "test.op"));
     }, 10);
 
@@ -259,7 +259,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.echo", { value: "hello" });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.echo",
       input: { value: "hello" },
     });
@@ -281,7 +281,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.voidOp", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.voidOp",
       input: {},
     });
@@ -319,7 +319,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.mcpOp", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.mcpOp",
       input: {},
     });
@@ -354,7 +354,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.httpOp", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.httpOp",
       input: {},
     });
@@ -387,7 +387,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.throws", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.throws",
       input: {},
     });
@@ -417,7 +417,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.throwsCallError", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.throwsCallError",
       input: {},
     });
@@ -440,7 +440,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.nonexistent", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.nonexistent",
       input: {},
     });
@@ -473,7 +473,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.noHandler", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.noHandler",
       input: {},
     });
@@ -497,7 +497,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -520,7 +520,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.nonexistent", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.nonexistent",
       input: {},
     });
@@ -554,7 +554,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.defaultsFields", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.defaultsFields",
       input: {},
     });
@@ -583,7 +583,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.unknownOutput", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.unknownOutput",
       input: {},
     });
@@ -615,7 +615,7 @@ describe("CallHandler", () => {
     const callPromise = callMap.call("test.customError", {});
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.customError",
       input: {},
     });
@@ -676,7 +676,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -701,7 +701,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -730,7 +730,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -759,7 +759,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -788,7 +788,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -808,7 +808,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.open", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.open",
       input: {},
       identity,
@@ -832,7 +832,7 @@ describe("checkAccess resource access control", () => {
     const callPromise = callMap.call("test.guarded", {}, { identity });
 
     await handler({
-      requestId: [...callMap["requests"].keys()][0],
+      requestId: [...callMap["entries"].keys()][0],
       operationId: "test.guarded",
       input: {},
       identity,
@@ -840,5 +840,317 @@ describe("checkAccess resource access control", () => {
 
     const result = await callPromise;
     expect(result.data).toEqual({ ok: true });
+  });
+});
+
+describe("PendingRequestMap.subscribe()", () => {
+  it("yields each envelope from call.responded events", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.stream", { filter: "all" });
+
+    const results: ResponseEnvelope[] = [];
+    const consumePromise = (async () => {
+      for await (const envelope of subscribeIter) {
+        results.push(envelope);
+        if (results.length === 3) break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const requestId = [...map["entries"].keys()][0];
+    map.respond(requestId, localEnvelope({ event: 1 }, "test.stream"));
+    map.respond(requestId, localEnvelope({ event: 2 }, "test.stream"));
+    map.respond(requestId, localEnvelope({ event: 3 }, "test.stream"));
+
+    await consumePromise;
+
+    expect(results).toHaveLength(3);
+    expect(results[0].data).toEqual({ event: 1 });
+    expect(results[1].data).toEqual({ event: 2 });
+    expect(results[2].data).toEqual({ event: 3 });
+    expect(results[0].meta.source).toBe("local");
+  });
+
+  it("publishes call.aborted when consumer stops iterating", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.stream", {});
+
+    let abortedReceived = false;
+    const abortedIter = map["pubsub"].subscribe("call.aborted", "");
+    (async () => {
+      for await (const envelope of abortedIter) {
+        abortedReceived = true;
+      }
+    })();
+
+    const results: ResponseEnvelope[] = [];
+    const consumePromise = (async () => {
+      for await (const envelope of subscribeIter) {
+        results.push(envelope);
+        if (results.length === 1) break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+    map.respond(requestId, localEnvelope("first", "test.stream"));
+
+    await consumePromise;
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(abortedReceived).toBe(true);
+  });
+
+  it("throws CallError when call.error event arrives", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.failing", {});
+    let caughtError: unknown;
+
+    const consumePromise = (async () => {
+      try {
+        for await (const _ of subscribeIter) {
+          // should not reach
+        }
+      } catch (error) {
+        caughtError = error;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+    map.emitError(requestId, "CUSTOM_ERROR", "Subscription failed");
+
+    await consumePromise;
+
+    expect(caughtError).toBeInstanceOf(CallError);
+    expect((caughtError as CallError).code).toBe("CUSTOM_ERROR");
+  });
+
+  it("closes iterator on call.aborted event", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.stream", {});
+    let iterationCompleted = false;
+
+    const consumePromise = (async () => {
+      for await (const _ of subscribeIter) {
+        // will receive abort
+      }
+      iterationCompleted = true;
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+
+    const entry = map["entries"].get(requestId);
+    expect(entry).toBeDefined();
+    expect(entry!.type).toBe("subscribe");
+
+    map["pubsub"].publish("call.aborted", "", { requestId });
+
+    await consumePromise;
+    expect(iterationCompleted).toBe(true);
+  });
+
+  it("times out on idle deadline", async () => {
+    const map = new PendingRequestMap();
+    const deadline = 80;
+
+    const subscribeIter = map.subscribe("test.slow", {}, { deadline });
+    let caughtError: unknown;
+
+    const consumePromise = (async () => {
+      try {
+        for await (const _ of subscribeIter) {
+          // should not receive any events
+        }
+      } catch (error) {
+        caughtError = error;
+      }
+    })();
+
+    await consumePromise;
+
+    expect(caughtError).toBeInstanceOf(CallError);
+    expect((caughtError as CallError).code).toBe(InfrastructureErrorCode.TIMEOUT);
+  });
+
+  it("resets idle timeout on each envelope", async () => {
+    const map = new PendingRequestMap();
+    const deadline = 150;
+
+    const subscribeIter = map.subscribe("test.heartbeat", {}, { deadline });
+
+    const results: ResponseEnvelope[] = [];
+    const consumePromise = (async () => {
+      for await (const envelope of subscribeIter) {
+        results.push(envelope);
+        if (results.length === 3) break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+
+    await new Promise((r) => setTimeout(r, 50));
+    map.respond(requestId, localEnvelope("event1", "test.heartbeat"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    map.respond(requestId, localEnvelope("event2", "test.heartbeat"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    map.respond(requestId, localEnvelope("event3", "test.heartbeat"));
+
+    await consumePromise;
+
+    expect(results).toHaveLength(3);
+    expect(results[0].data).toBe("event1");
+    expect(results[1].data).toBe("event2");
+    expect(results[2].data).toBe("event3");
+  });
+
+  it("abort() closes subscription iterator", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.stream", {});
+    let iterationCompleted = false;
+
+    const consumePromise = (async () => {
+      for await (const _ of subscribeIter) {
+        // will receive abort
+      }
+      iterationCompleted = true;
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+
+    map.abort(requestId);
+
+    await consumePromise;
+    expect(iterationCompleted).toBe(true);
+  });
+
+  it("tracks subscribe entries in pending count", async () => {
+    const map = new PendingRequestMap();
+
+    const subscribeIter = map.subscribe("test.stream", {});
+
+    const consumePromise = (async () => {
+      for await (const _ of subscribeIter) {
+        break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 30));
+    expect(map.getPendingCount()).toBe(1);
+
+    const requestId = [...map["entries"].keys()][0];
+    map.abort(requestId);
+    await new Promise((r) => setTimeout(r, 20));
+
+    await consumePromise;
+    expect(map.getPendingCount()).toBe(0);
+  });
+});
+
+describe("CallHandler SUBSCRIPTION dispatch", () => {
+  it("dispatches SUBSCRIPTION operations to subscribe()", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "events",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "event stream",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+      handler: async function* (_input: unknown, _context: unknown) {
+        yield "event1";
+        yield "event2";
+      },
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    const subscribeIter = callMap.subscribe("test.events", {});
+    const results: ResponseEnvelope[] = [];
+    const consumePromise = (async () => {
+      for await (const envelope of subscribeIter) {
+        results.push(envelope);
+        if (results.length === 2) break;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...callMap["entries"].keys()][0];
+
+    await handler({
+      requestId,
+      operationId: "test.events",
+      input: {},
+    });
+
+    await consumePromise;
+
+    expect(results).toHaveLength(2);
+    expect(results[0].data).toBe("event1");
+    expect(results[0].meta.source).toBe("local");
+    expect(results[1].data).toBe("event2");
+  });
+
+  it("publishes call.error for SUBSCRIPTION access denied", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "guarded",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "guarded sub",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: ["admin"] },
+      handler: async function* (_input: unknown, _context: unknown) {
+        yield "secret";
+      },
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    const identity: Identity = { id: "user1", scopes: [] };
+    const subscribeIter = callMap.subscribe("test.guarded", {}, { identity });
+    let caughtError: unknown;
+
+    const consumePromise = (async () => {
+      try {
+        for await (const _ of subscribeIter) {
+          // should not reach
+        }
+      } catch (error) {
+        caughtError = error;
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...callMap["entries"].keys()][0];
+
+    await handler({
+      requestId,
+      operationId: "test.guarded",
+      input: {},
+      identity,
+    });
+
+    await consumePromise;
+
+    expect(caughtError).toBeInstanceOf(CallError);
+    expect((caughtError as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
   });
 });

@@ -1,6 +1,6 @@
 import * as Type from "@alkdev/typebox";
 import { FromSchema } from "./from_schema.js";
-import { OperationType, type OperationSpec, type OperationHandler, type OperationContext } from "./types.js";
+import { OperationType, type OperationSpec, type OperationHandler, type SubscriptionHandler, type OperationContext } from "./types.js";
 import { CallError } from "./error.js";
 import { httpEnvelope } from "./response-envelope.js";
 
@@ -49,6 +49,95 @@ export interface HTTPServiceConfig {
     prefix?: string;
   };
   timeout?: number;
+}
+
+export interface SSEEvent {
+  data: string;
+  eventType: string;
+  lastEventId: string;
+}
+
+export function parseSSEFrames(buffer: string): { events: SSEEvent[]; remaining: string } {
+  const events: SSEEvent[] = [];
+  let remaining = "";
+
+  let text = buffer;
+  if (text.charCodeAt(0) === 0xfeff) {
+    text = text.slice(1);
+  }
+
+  const lines = text.split(/\r\n|\r|\n/);
+
+  let dataBuffer: string[] = [];
+  let eventType = "";
+  let lastEventId = "";
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (i === lines.length - 1) {
+      remaining = line;
+      break;
+    }
+
+    if (line === "") {
+      if (dataBuffer.length > 0) {
+        events.push({
+          data: dataBuffer.join("\n"),
+          eventType: eventType || "message",
+          lastEventId,
+        });
+      }
+      dataBuffer = [];
+      eventType = "";
+      continue;
+    }
+
+    if (line.startsWith(":")) {
+      continue;
+    }
+
+    const colonIndex = line.indexOf(":");
+    if (colonIndex === -1) {
+      const field = line;
+      const value = "";
+      processSSEField(field, value, dataBuffer, (type) => { eventType = type; }, (id) => { lastEventId = id; });
+      continue;
+    }
+
+    const field = line.slice(0, colonIndex);
+    let value = line.slice(colonIndex + 1);
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    processSSEField(field, value, dataBuffer, (type) => { eventType = type; }, (id) => { lastEventId = id; });
+  }
+
+  if (dataBuffer.length > 0) {
+    remaining = dataBuffer.join("\n");
+  }
+
+  return { events, remaining };
+}
+
+function processSSEField(
+  field: string,
+  value: string,
+  dataBuffer: string[],
+  setEventType: (type: string) => void,
+  setLastEventId: (id: string) => void,
+): void {
+  switch (field) {
+    case "data":
+      dataBuffer.push(value);
+      break;
+    case "event":
+      setEventType(value);
+      break;
+    case "id":
+      setLastEventId(value);
+      break;
+  }
 }
 
 function resolveRef(spec: OpenAPISpec, ref: string): unknown {
@@ -221,16 +310,109 @@ function getAuthHeaders(config: HTTPServiceConfig): Record<string, string> {
   return headers;
 }
 
+type HTTPOperationHandler = OperationHandler<unknown, unknown, OperationContext> | SubscriptionHandler<unknown, unknown, OperationContext>;
+
 function createHTTPOperation(
   spec: OpenAPISpec,
   operation: OpenAPIOperation,
   method: string,
   path: string,
   config: HTTPServiceConfig,
-): OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> } {
+): OperationSpec & { handler: HTTPOperationHandler } {
   const operationId = normalizeOperationId(operation, method, path);
   const opType = detectOperationType(method, operation);
   const authHeaders = getAuthHeaders(config);
+  const responseHeaders = (): Record<string, string> => ({ ...authHeaders, "Content-Type": "application/json" });
+
+  if (opType === OperationType.SUBSCRIPTION) {
+    const handler: SubscriptionHandler<unknown, unknown, OperationContext> = async function* (input: unknown, context: OperationContext) {
+      const inputObj = (input as Record<string, unknown>) || {};
+
+      let urlPath = path;
+      const queryParams: Record<string, string> = {};
+
+      for (const [key, value] of Object.entries(inputObj)) {
+        if (path.includes(`{${key}}`)) {
+          urlPath = urlPath.replace(`{${key}}`, encodeURIComponent(String(value)));
+        } else if (key === "body") {
+          // body not typically used for SSE GET, but supported
+        } else {
+          queryParams[key] = String(value);
+        }
+      }
+
+      const url = new URL(config.baseUrl + urlPath);
+      for (const [key, value] of Object.entries(queryParams)) {
+        url.searchParams.set(key, value);
+      }
+
+      const headers: Record<string, string> = {
+        ...authHeaders,
+        "Accept": "text/event-stream",
+      };
+
+      const response = await fetch(url.toString(), {
+        method: method.toUpperCase(),
+        headers,
+        signal: config.timeout ? AbortSignal.timeout(config.timeout) : undefined,
+      });
+
+      if (!response.ok) {
+        throw new CallError("EXECUTION_ERROR", `HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const responseHeadersObj = Object.fromEntries(response.headers.entries());
+
+      try {
+        while (true) {
+          const { done, value: chunk } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(chunk, { stream: true });
+          const { events, remaining } = parseSSEFrames(buffer);
+          buffer = remaining;
+
+          for (const event of events) {
+            if (event.data.trim() === "") continue;
+            let parsedData: unknown = event.data;
+            try {
+              parsedData = JSON.parse(event.data);
+            } catch {
+              // not JSON — yield raw data string
+            }
+            yield httpEnvelope(parsedData, {
+              statusCode: response.status,
+              headers: responseHeadersObj,
+              contentType: "text/event-stream",
+            });
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    };
+
+    return {
+      name: operationId,
+      namespace: config.namespace,
+      version: "1.0.0",
+      type: opType,
+      description: operation.description || operation.summary || `${method.toUpperCase()} ${path}`,
+      tags: operation.tags,
+      inputSchema: buildInputSchema(spec, operation),
+      outputSchema: buildOutputSchema(spec, operation),
+      accessControl: { requiredScopes: [] },
+      handler,
+      _meta: {
+        method: method.toUpperCase(),
+        path,
+        summary: operation.summary,
+      },
+    };
+  }
 
   const handler: OperationHandler<unknown, unknown, OperationContext> = async (input: unknown, context: OperationContext) => {
     const inputObj = (input as Record<string, unknown>) || {};
@@ -306,8 +488,8 @@ function createHTTPOperation(
   };
 }
 
-export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }> {
-  const operations: Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }> = [];
+export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array<OperationSpec & { handler: HTTPOperationHandler }> {
+  const operations: Array<OperationSpec & { handler: HTTPOperationHandler }> = [];
   const basePath = spec.basePath || "";
 
   for (const [path, methods] of Object.entries(spec.paths)) {
@@ -328,7 +510,7 @@ export function FromOpenAPI(spec: OpenAPISpec, config: HTTPServiceConfig): Array
   return operations;
 }
 
-export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, fs?: OpenAPIFS): Promise<Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }>> {
+export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, fs?: OpenAPIFS): Promise<Array<OperationSpec & { handler: HTTPOperationHandler }>> {
   let content: string;
   if (fs) {
     content = await fs.readFile(path);
@@ -340,7 +522,7 @@ export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, f
   return FromOpenAPI(spec, config);
 }
 
-export async function FromOpenAPIUrl(url: string, config: HTTPServiceConfig): Promise<Array<OperationSpec & { handler: OperationHandler<unknown, unknown, OperationContext> }>> {
+export async function FromOpenAPIUrl(url: string, config: HTTPServiceConfig): Promise<Array<OperationSpec & { handler: HTTPOperationHandler }>> {
   const response = await fetch(url);
   const spec = await response.json() as OpenAPISpec;
   return FromOpenAPI(spec, config);

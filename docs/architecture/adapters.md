@@ -1,6 +1,6 @@
 ---
-status: draft
-last_updated: 2026-05-11
+status: stable
+last_updated: 2026-05-16
 ---
 
 # Adapters

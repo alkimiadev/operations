@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { FromOpenAPI } from "../src/from_openapi.js";
+import { FromOpenAPI, parseSSEFrames } from "../src/from_openapi.js";
 import { OperationType } from "../src/types.js";
+import type { SubscriptionHandler } from "../src/types.js";
 import { CallError } from "../src/error.js";
 import { isResponseEnvelope } from "../src/response-envelope.js";
 import { Value } from "@alkdev/typebox/value";
@@ -393,6 +394,198 @@ describe("FromOpenAPI handler envelope behavior", () => {
       const meta = result.meta as { headers: Record<string, string> };
       expect(meta.headers["content-type"]).toBe("application/json");
       expect(meta.headers["x-request-id"]).toBe("req-123");
+    }
+  });
+});
+
+describe("parseSSEFrames", () => {
+  it("parses a simple SSE event", () => {
+    const buffer = "data: hello\n\n";
+    const { events, remaining } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+    expect(events[0].eventType).toBe("message");
+  });
+
+  it("parses multiple SSE events", () => {
+    const buffer = "data: first\n\ndata: second\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(2);
+    expect(events[0].data).toBe("first");
+    expect(events[1].data).toBe("second");
+  });
+
+  it("parses multi-line data fields (joined with \\n)", () => {
+    const buffer = "data: line1\ndata: line2\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("line1\nline2");
+  });
+
+  it("parses event type field", () => {
+    const buffer = "event: custom\ndata: payload\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe("custom");
+    expect(events[0].data).toBe("payload");
+  });
+
+  it("parses id field", () => {
+    const buffer = "id: 42\ndata: payload\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].lastEventId).toBe("42");
+  });
+
+  it("ignores comment lines (starting with :)", () => {
+    const buffer = ": this is a comment\ndata: hello\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("handles CRLF line endings", () => {
+    const buffer = "data: hello\r\n\r\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("handles CR line endings", () => {
+    const buffer = "data: hello\r\r";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("strips BOM at stream start", () => {
+    const buffer = "\uFEFFdata: hello\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("hello");
+  });
+
+  it("removes single leading space after data: per WHATWG spec", () => {
+    const buffer = "data:  two spaces\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe(" two spaces");
+  });
+
+  it("handles partial lines (returns as remaining)", () => {
+    const buffer = "data: incom";
+    const { events, remaining } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(0);
+    expect(remaining).toBe("data: incom");
+  });
+
+  it("handles empty data with empty line dispatch", () => {
+    const buffer = "data:\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBe("");
+  });
+
+  it("skips events with no data lines (empty dispatch)", () => {
+    const buffer = "event: ping\n\n";
+    const { events } = parseSSEFrames(buffer);
+    expect(events).toHaveLength(0);
+  });
+});
+
+describe("FromOpenAPI SUBSCRIPTION handler", () => {
+  const config = {
+    namespace: "api",
+    baseUrl: "https://api.example.com",
+  };
+
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("generates SubscriptionHandler for SUBSCRIPTION type operations", () => {
+    const ops = FromOpenAPI(simpleSpec as any, config);
+    const streamEvents = ops.find((o) => o.name === "streamEvents")!;
+    expect(streamEvents.type).toBe(OperationType.SUBSCRIPTION);
+    expect(typeof streamEvents.handler).toBe("function");
+  });
+
+  it("SSE handler yields events as httpEnvelope", async () => {
+    const sseStream = [
+      "data: {\"event\":\"ping\"}\n\n",
+      "data: {\"event\":\"pong\"}\n\n",
+    ].join("");
+
+    const encoder = new TextEncoder();
+    const chunks = [encoder.encode(sseStream)];
+
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: chunks[0] })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      releaseLock: vi.fn(),
+    };
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "Content-Type": "text/event-stream" }),
+      body: { getReader: () => reader },
+    });
+
+    const ops = FromOpenAPI(simpleSpec as any, config);
+    const streamEvents = ops.find((o) => o.name === "streamEvents")!;
+    const handler = streamEvents.handler as SubscriptionHandler<unknown, unknown, unknown>;
+
+    const results: unknown[] = [];
+    for await (const value of handler({}, {} as any)) {
+      results.push(value);
+    }
+
+    expect(results).toHaveLength(2);
+    expect(isResponseEnvelope(results[0])).toBe(true);
+    if (isResponseEnvelope(results[0])) {
+      expect(results[0].meta.source).toBe("http");
+      expect(results[0].data).toEqual({ event: "ping" });
+      const meta = results[0].meta as { statusCode: number; contentType: string };
+      expect(meta.statusCode).toBe(200);
+      expect(meta.contentType).toBe("text/event-stream");
+    }
+    expect(isResponseEnvelope(results[1])).toBe(true);
+    if (isResponseEnvelope(results[1])) {
+      expect(results[1].data).toEqual({ event: "pong" });
+    }
+    expect(reader.releaseLock).toHaveBeenCalled();
+  });
+
+  it("SSE handler throws CallError on HTTP error", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: new Headers(),
+    });
+
+    const ops = FromOpenAPI(simpleSpec as any, config);
+    const streamEvents = ops.find((o) => o.name === "streamEvents")!;
+    const handler = streamEvents.handler as SubscriptionHandler<unknown, unknown, unknown>;
+
+    try {
+      for await (const _ of handler({}, {} as any)) {
+        // should not reach
+      }
+      expect.fail("Expected CallError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe("EXECUTION_ERROR");
+      expect((error as CallError).message).toContain("HTTP 500");
     }
   });
 });

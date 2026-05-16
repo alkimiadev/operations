@@ -2,7 +2,7 @@ import type { OperationContext, AccessControl } from "./types.js";
 import { OperationRegistry } from "./registry.js";
 import { type ResponseEnvelope, isResponseEnvelope, localEnvelope } from "./response-envelope.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
-import { checkAccess } from "./call.js";
+import { checkAccess } from "./access.js";
 
 export async function* subscribe(
   registry: OperationRegistry,

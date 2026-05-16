@@ -1,6 +1,6 @@
 ---
-status: draft
-last_updated: 2026-05-11
+status: stable
+last_updated: 2026-05-16
 ---
 
 # Response Envelopes
@@ -514,9 +514,9 @@ The following **code** changes are pending:
 
 | Code | Change | Status |
 |------|--------|--------|
-| `src/from_openapi.ts` | Generate `SubscriptionHandler` (AsyncGenerator) for SUBSCRIPTION operations, parse SSE stream, yield per-event | ❌ Not started |
-| `src/call.ts` | Add `PendingRequestMap.subscribe()` method using Repeater from `@alkdev/pubsub` | ❌ Not started |
-| `src/call.ts` | Update `CallHandler` to dispatch on operation type | ❌ Not started |
+| `src/from_openapi.ts` | Generate `SubscriptionHandler` (AsyncGenerator) for SUBSCRIPTION operations, parse SSE stream, yield per-event | ✅ Implemented |
+| `src/call.ts` | Add `PendingRequestMap.subscribe()` method using Repeater from `@alkdev/pubsub` | ✅ Implemented |
+| `src/call.ts` | Update `CallHandler` to dispatch on operation type | ✅ Implemented |
 | `src/subscribe.ts` | Ensure `subscribe()` handles `httpEnvelope` detection for SSE yields | ✅ Already handles envelopes |
 
 ## References

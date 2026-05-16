@@ -5,7 +5,7 @@ import { KindGuard } from "@alkdev/typebox";
 import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
 import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
-import { checkAccess } from "./call.js";
+import { checkAccess } from "./access.js";
 
 const logger = getLogger("operations:registry");
 

@@ -1,10 +1,12 @@
 import { Type, type Static } from "@alkdev/typebox";
-import { createPubSub, type PubSub } from "@alkdev/pubsub";
+import { createPubSub, type PubSub, Repeater, type Push, type Stop } from "@alkdev/pubsub";
 import { OperationRegistry } from "./registry.js";
+import { subscribe } from "./subscribe.js";
 import { CallError, InfrastructureErrorCode, mapError } from "./error.js";
 import { ResponseEnvelopeSchema, isResponseEnvelope } from "./response-envelope.js";
 import type { ResponseEnvelope } from "./response-envelope.js";
-import type { Identity, OperationContext, AccessControl } from "./types.js";
+import type { Identity, OperationContext } from "./types.js";
+import { OperationType } from "./types.js";
 
 export const CallEventSchema = {
   "call.requested": Type.Object({
@@ -49,12 +51,24 @@ type CallPubSubMap = {
   "call.error": CallErrorEvent;
 };
 
-interface PendingRequest {
+interface PendingCall {
   resolve: (value: ResponseEnvelope) => void;
   reject: (reason: unknown) => void;
   deadline?: number;
   timer?: ReturnType<typeof setTimeout>;
 }
+
+interface SubscriptionState {
+  push: Push<ResponseEnvelope>;
+  stop: Stop;
+  deadline?: number;
+  timer?: ReturnType<typeof setTimeout>;
+  consumerStopped?: boolean;
+}
+
+type PendingEntry =
+  | { type: "call"; pending: PendingCall }
+  | { type: "subscribe"; state: SubscriptionState };
 
 export interface CallHandlerConfig {
   registry: OperationRegistry;
@@ -64,7 +78,7 @@ export interface CallHandlerConfig {
 export type CallHandler = (event: CallRequestedEvent) => Promise<void>;
 
 export class PendingRequestMap {
-  private requests = new Map<string, PendingRequest>();
+  private entries = new Map<string, PendingEntry>();
   private pubsub: PubSub<CallPubSubMap>;
 
   constructor(eventTarget?: EventTarget) {
@@ -79,11 +93,21 @@ export class PendingRequestMap {
     (async () => {
       for await (const envelope of respondedIter) {
         const responded = envelope.payload;
-        const pending = this.requests.get(responded.requestId);
-        if (pending) {
-          if (pending.timer) clearTimeout(pending.timer);
-          this.requests.delete(responded.requestId);
-          pending.resolve(responded.output as ResponseEnvelope);
+        const entry = this.entries.get(responded.requestId);
+        if (!entry) continue;
+
+        if (entry.type === "call") {
+          if (entry.pending.timer) clearTimeout(entry.pending.timer);
+          this.entries.delete(responded.requestId);
+          entry.pending.resolve(responded.output as ResponseEnvelope);
+        } else {
+          if (entry.state.timer) {
+            clearTimeout(entry.state.timer);
+            if (entry.state.deadline) {
+              entry.state.timer = this.startSubscriptionTimer(responded.requestId, entry.state.deadline);
+            }
+          }
+          entry.state.push(responded.output as ResponseEnvelope);
         }
       }
     })();
@@ -92,11 +116,18 @@ export class PendingRequestMap {
     (async () => {
       for await (const envelope of errorIter) {
         const err = envelope.payload;
-        const pending = this.requests.get(err.requestId);
-        if (pending) {
-          if (pending.timer) clearTimeout(pending.timer);
-          this.requests.delete(err.requestId);
-          pending.reject(new CallError(err.code, err.message, err.details));
+        const entry = this.entries.get(err.requestId);
+        if (!entry) continue;
+
+        if (entry.type === "call") {
+          if (entry.pending.timer) clearTimeout(entry.pending.timer);
+          this.entries.delete(err.requestId);
+          entry.pending.reject(new CallError(err.code, err.message, err.details));
+        } else {
+          if (entry.state.timer) clearTimeout(entry.state.timer);
+          entry.state.consumerStopped = true;
+          entry.state.stop(new CallError(err.code, err.message, err.details));
+          this.entries.delete(err.requestId);
         }
       }
     })();
@@ -105,14 +136,32 @@ export class PendingRequestMap {
     (async () => {
       for await (const envelope of abortedIter) {
         const aborted = envelope.payload;
-        const pending = this.requests.get(aborted.requestId);
-        if (pending) {
-          if (pending.timer) clearTimeout(pending.timer);
-          this.requests.delete(aborted.requestId);
-          pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${aborted.requestId} was aborted`));
+        const entry = this.entries.get(aborted.requestId);
+        if (!entry) continue;
+
+        if (entry.type === "call") {
+          if (entry.pending.timer) clearTimeout(entry.pending.timer);
+          this.entries.delete(aborted.requestId);
+          entry.pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${aborted.requestId} was aborted`));
+        } else {
+          if (entry.state.timer) clearTimeout(entry.state.timer);
+          entry.state.consumerStopped = true;
+          entry.state.stop();
+          this.entries.delete(aborted.requestId);
         }
       }
     })();
+  }
+
+  private startSubscriptionTimer(requestId: string, deadline: number): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      const entry = this.entries.get(requestId);
+      if (!entry || entry.type !== "subscribe") return;
+      if (entry.state.timer) clearTimeout(entry.state.timer);
+      entry.state.consumerStopped = true;
+      this.pubsub.publish("call.aborted", "", { requestId });
+      entry.state.stop(new CallError(InfrastructureErrorCode.TIMEOUT, `Subscription ${requestId} timed out (idle)`, { deadline }));
+    }, deadline);
   }
 
   async call(
@@ -123,17 +172,17 @@ export class PendingRequestMap {
     const requestId = crypto.randomUUID();
 
     return new Promise((resolve, reject) => {
-      const pending: PendingRequest = { resolve, reject };
+      const pending: PendingCall = { resolve, reject };
 
       if (options?.deadline) {
         pending.deadline = options.deadline;
         pending.timer = setTimeout(() => {
-          this.requests.delete(requestId);
+          this.entries.delete(requestId);
           reject(new CallError(InfrastructureErrorCode.TIMEOUT, `Request ${requestId} timed out`, { deadline: options.deadline }));
         }, options.deadline - Date.now());
       }
 
-      this.requests.set(requestId, pending);
+      this.entries.set(requestId, { type: "call", pending });
 
       this.pubsub.publish("call.requested", "", {
         requestId,
@@ -144,6 +193,47 @@ export class PendingRequestMap {
         identity: options?.identity,
       });
     });
+  }
+
+  subscribe(
+    operationId: string,
+    input: unknown,
+    options?: { parentRequestId?: string; deadline?: number; identity?: Identity },
+  ): AsyncIterable<ResponseEnvelope> {
+    const requestId = crypto.randomUUID();
+
+    const repeater = new Repeater<ResponseEnvelope>((push: Push<ResponseEnvelope>, stop: Stop) => {
+      const state: SubscriptionState = { push, stop };
+
+      if (options?.deadline) {
+        state.deadline = options.deadline;
+        state.timer = this.startSubscriptionTimer(requestId, options.deadline);
+      }
+
+      this.entries.set(requestId, { type: "subscribe", state });
+
+      this.pubsub.publish("call.requested", "", {
+        requestId,
+        operationId,
+        input,
+        parentRequestId: options?.parentRequestId,
+        deadline: options?.deadline,
+        identity: options?.identity,
+      });
+
+      stop.then(() => {
+        const entry = this.entries.get(requestId);
+        if (entry && entry.type === "subscribe") {
+          if (entry.state.timer) clearTimeout(entry.state.timer);
+          if (!entry.state.consumerStopped) {
+            this.pubsub.publish("call.aborted", "", { requestId });
+          }
+          this.entries.delete(requestId);
+        }
+      });
+    });
+
+    return repeater;
   }
 
   respond(requestId: string, output: ResponseEnvelope): void {
@@ -166,17 +256,24 @@ export class PendingRequestMap {
   }
 
   abort(requestId: string): void {
-    const pending = this.requests.get(requestId);
-    if (pending) {
-      if (pending.timer) clearTimeout(pending.timer);
-      this.requests.delete(requestId);
+    const entry = this.entries.get(requestId);
+    if (!entry) return;
+
+    if (entry.type === "call") {
+      if (entry.pending.timer) clearTimeout(entry.pending.timer);
+      this.entries.delete(requestId);
       this.pubsub.publish("call.aborted", "", { requestId });
-      pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${requestId} was aborted`));
+      entry.pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${requestId} was aborted`));
+    } else {
+      if (entry.state.timer) clearTimeout(entry.state.timer);
+      entry.state.consumerStopped = true;
+      this.pubsub.publish("call.aborted", "", { requestId });
+      entry.state.stop();
     }
   }
 
   getPendingCount(): number {
-    return this.requests.size;
+    return this.entries.size;
   }
 }
 
@@ -193,8 +290,19 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
     };
 
     try {
-      const envelope = await registry.execute(operationId, input, context);
-      callMap.respond(requestId, envelope);
+      const spec = registry.getSpec(operationId);
+      if (!spec) {
+        throw new CallError(InfrastructureErrorCode.OPERATION_NOT_FOUND, `Operation not found: ${operationId}`, { operationId });
+      }
+
+      if (spec.type === OperationType.SUBSCRIPTION) {
+        for await (const envelope of subscribe(registry, operationId, input, context)) {
+          callMap.respond(requestId, envelope);
+        }
+      } else {
+        const envelope = await registry.execute(operationId, input, context);
+        callMap.respond(requestId, envelope);
+      }
     } catch (error) {
       const spec = registry.getSpec(operationId);
       const callError = mapError(error, spec?.errorSchemas);
@@ -203,29 +311,5 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
   };
 }
 
-export function checkAccess(accessControl: AccessControl, identity: Identity): boolean {
-  const { requiredScopes, requiredScopesAny, resourceType, resourceAction } = accessControl;
 
-  if (requiredScopes.length > 0) {
-    const hasAll = requiredScopes.every((scope: string) => identity.scopes.includes(scope));
-    if (!hasAll) return false;
-  }
-
-  if (requiredScopesAny && requiredScopesAny.length > 0) {
-    const hasAny = requiredScopesAny.some((scope: string) => identity.scopes.includes(scope));
-    if (!hasAny) return false;
-  }
-
-  if (resourceType && resourceAction) {
-    if (!identity.resources) return false;
-    for (const [key, actions] of Object.entries(identity.resources)) {
-      if (key.startsWith(`${resourceType}:`) && actions.includes(resourceAction)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  return true;
-}
 
