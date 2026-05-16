@@ -26,6 +26,16 @@
         "types": "./dist/from-mcp.d.cts",
         "default": "./dist/from-mcp.cjs"
       }
+    },
+    "./from-typemap": {
+      "import": {
+        "types": "./dist/from-typemap.d.ts",
+        "default": "./dist/from-typemap.js"
+      },
+      "require": {
+        "types": "./dist/from-typemap.d.cts",
+        "default": "./dist/from-typemap.cjs"
+      }
     }
   },
   "publishConfig": {
@@ -53,24 +63,30 @@
   ],
   "license": "MIT OR Apache-2.0",
   "dependencies": {
-    "@alkdev/typebox": "^0.34.49",
     "@alkdev/pubsub": "^0.1.0",
+    "@alkdev/typebox": "^0.34.49",
     "@logtape/logtape": "^2.0.0"
   },
   "peerDependencies": {
+    "@alkdev/typemap": "^0.10.0",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
       "optional": true
+    },
+    "@alkdev/typemap": {
+      "optional": true
     }
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@alkdev/typemap": "^0.10.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^3.2.4",
     "tsup": "^8.5.1",
     "typescript": "^5.7.0",
+    "valibot": "^1.4.0",
     "vitest": "^3.1.0"
   },
   "engines": {

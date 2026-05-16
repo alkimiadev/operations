@@ -4,6 +4,7 @@ export default defineConfig({
   entry: [
     'src/index.ts',
     'src/from_mcp.ts',
+    'src/from_typemap.ts',
   ],
   format: ['esm', 'cjs'],
   dts: true,

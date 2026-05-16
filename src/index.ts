@@ -1,6 +1,7 @@
 export { OperationType, OperationContextSchema, OperationSpecSchema, AccessControlSchema, ErrorDefinitionSchema } from "./types.js";
 export type { IOperationDefinition, OperationHandler, SubscriptionHandler, Identity, OperationEnv, OperationContext, OperationSpec, AccessControl, ErrorDefinition } from "./types.js";
 export { OperationRegistry } from "./registry.js";
+export type { RegistryOptions } from "./registry.js";
 export { formatValueErrors, assertIsSchema, validateOrThrow, collectErrors } from "./validation.js";
 export { buildEnv } from "./env.js";
 export type { EnvOptions } from "./env.js";
@@ -15,6 +16,8 @@ export { PendingRequestMap, buildCallHandler } from "./call.js";
 export type { CallEventMap, CallEventMapValue, CallRequestedEvent, CallRespondedEvent, CallAbortedEvent, CallErrorEvent, CallHandler, CallHandlerConfig } from "./call.js";
 export { checkAccess } from "./access.js";
 export { subscribe } from "./subscribe.js";
+export { defaultAdapter, zodAdapter, valibotAdapter } from "./from_typemap.js";
+export type { SchemaAdapter } from "./from_typemap.js";
 export { createMCPClient, closeMCPClient, MCPClientLoader } from "./from_mcp.js";
 export type { MCPClientConfig, MCPClientWrapper } from "./from_mcp.js";
 export { ResponseEnvelopeSchema, ResponseMetaSchema, RESPONSE_SOURCES, isResponseEnvelope, localEnvelope, httpEnvelope, mcpEnvelope, unwrap } from "./response-envelope.js";

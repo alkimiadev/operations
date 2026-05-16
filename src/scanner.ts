@@ -93,5 +93,9 @@ async function processDirectory(
 }
 
 function pathToFileURL(absolutePath: string): string {
-  return `file://${absolutePath}`;
+  let normalized = absolutePath.replace(/\\/g, "/");
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  return `file://${encodeURI(normalized).replace(/#/g, "%23")}`;
 }
