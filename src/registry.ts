@@ -5,7 +5,7 @@ import { KindGuard, type TSchema } from "@alkdev/typebox";
 import { assertIsSchema, validateOrThrow, collectErrors, formatValueErrors } from "./validation.js";
 import { isResponseEnvelope, localEnvelope, type ResponseEnvelope } from "./response-envelope.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
-import { checkAccess } from "./access.js";
+import { checkAccess, enforceAccess } from "./access.js";
 import type { SchemaAdapter } from "./from_typemap.js";
 import { defaultAdapter } from "./from_typemap.js";
 
@@ -121,25 +121,7 @@ export class OperationRegistry {
       );
     }
 
-    if (!context.trusted) {
-      const accessControl: AccessControl = spec.accessControl as AccessControl;
-      if (accessControl.requiredScopes.length > 0 || accessControl.requiredScopesAny?.length || accessControl.resourceType) {
-        if (!context.identity) {
-          throw new CallError(
-            InfrastructureErrorCode.ACCESS_DENIED,
-            `Access denied for operation: ${operationId} — identity required`,
-            { operationId, requiredScopes: accessControl.requiredScopes },
-          );
-        }
-        if (!checkAccess(accessControl, context.identity)) {
-          throw new CallError(
-            InfrastructureErrorCode.ACCESS_DENIED,
-            `Access denied for operation: ${operationId}`,
-            { requiredScopes: accessControl.requiredScopes },
-          );
-        }
-      }
-    }
+    enforceAccess(spec.accessControl as AccessControl, context.identity, operationId, context.trusted);
 
     validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);
 

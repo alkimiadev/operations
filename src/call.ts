@@ -7,6 +7,9 @@ import { ResponseEnvelopeSchema, isResponseEnvelope } from "./response-envelope.
 import type { ResponseEnvelope } from "./response-envelope.js";
 import type { Identity, OperationContext } from "./types.js";
 import { OperationType } from "./types.js";
+import { getLogger } from "@logtape/logtape";
+
+const logger = getLogger("operations:call");
 
 export const CallEventSchema = {
   "call.requested": Type.Object({
@@ -20,6 +23,7 @@ export const CallEventSchema = {
       scopes: Type.Array(Type.String()),
       resources: Type.Optional(Type.Record(Type.String(), Type.Array(Type.String()))),
     })),
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   }),
   "call.responded": Type.Object({
     requestId: Type.String(),
@@ -110,7 +114,9 @@ export class PendingRequestMap {
           entry.state.push(responded.output as ResponseEnvelope);
         }
       }
-    })();
+    })().catch((error) => {
+      logger.error(`call.responded listener error: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     const errorIter = this.pubsub.subscribe("call.error", "");
     (async () => {
@@ -130,7 +136,9 @@ export class PendingRequestMap {
           this.entries.delete(err.requestId);
         }
       }
-    })();
+    })().catch((error) => {
+      logger.error(`call.error listener error: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     const abortedIter = this.pubsub.subscribe("call.aborted", "");
     (async () => {
@@ -150,7 +158,9 @@ export class PendingRequestMap {
           this.entries.delete(aborted.requestId);
         }
       }
-    })();
+    })().catch((error) => {
+      logger.error(`call.aborted listener error: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   private startSubscriptionTimer(requestId: string, deadline: number): ReturnType<typeof setTimeout> {
@@ -281,12 +291,13 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
   const { registry, callMap } = config;
 
   return async (event: CallRequestedEvent): Promise<void> => {
-    const { requestId, operationId, input, identity } = event;
+    const { requestId, operationId, input, identity, metadata } = event;
 
     const context: OperationContext = {
       requestId,
       parentRequestId: event.parentRequestId,
       identity,
+      metadata,
     };
 
     try {

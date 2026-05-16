@@ -33,8 +33,6 @@ type OperationContextBase = Static<typeof OperationContextSchema>
 
 export type OperationContext = OperationContextBase & {
   env?: OperationEnv
-  stream?: () => AsyncIterable<unknown>
-  pubsub?: unknown
 }
 
 export const ErrorDefinitionSchema = Type.Object({
@@ -57,7 +55,6 @@ export const AccessControlSchema = Type.Object({
     Type.Array(Type.String({description: "Required scopes (at least one must match)"}))),
   resourceType: Type.Optional(Type.String({description: "Resource Type e.g., project, tool, data"})),
   resourceAction: Type.Optional(Type.String({description: "Required action on the resource e.g., read, write, execute"})),
-  customAuth: Type.Optional(Type.String({description: "Name of custom auth function"})),
 });
 
 export type AccessControl = Static<typeof AccessControlSchema>;

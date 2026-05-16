@@ -1,4 +1,4 @@
-import type { OperationSpec, OperationHandler } from "./types.js";
+import type { OperationSpec, OperationHandler, OperationContext } from "./types.js";
 import { OperationType } from "./types.js";
 import { Kind, Type, type TSchema } from "@alkdev/typebox";
 import { Value } from "@alkdev/typebox/value";
@@ -16,6 +16,7 @@ export interface MCPClientConfig {
   cwd?: string;
   url?: string;
   headers?: Record<string, string>;
+  version?: string;
 }
 
 export interface MCPClientWrapper {
@@ -120,19 +121,29 @@ export async function createMCPClient(
     return {
       name: tool.name,
       namespace: name,
-      version: "1.0.0",
+      version: config.version || "1.0.0",
       type: OperationType.MUTATION,
       description: tool.description || "",
       tags: [],
       inputSchema: FromSchema(tool.inputSchema) as TSchema,
       outputSchema,
       accessControl: { requiredScopes: [] },
-      handler: async (input: unknown) => {
-        logger.debug(`Calling MCP tool: ${name}.${tool.name}`);
+      handler: async (input: unknown, context: OperationContext) => {
+        logger.debug(`Calling MCP tool: ${name}.${tool.name}`, context.identity ? { identity: context.identity.id } : undefined);
         const result = await client.callTool({
           name: tool.name,
           arguments: input as Record<string, unknown>,
         });
+
+        if (result.isError) {
+          const contentBlocks = Array.isArray(result.content) ? result.content : [];
+          const errorContent = mapMCPContentBlocks(contentBlocks);
+          throw new CallError(
+            InfrastructureErrorCode.EXECUTION_ERROR,
+            `MCP tool ${name}.${tool.name} returned error: ${errorContent.map(b => b.type === "text" ? b.text : JSON.stringify(b)).join("; ")}`,
+            { toolName: tool.name, serverName: name, isError: true },
+          );
+        }
 
         const structuredContent = (result as any).structuredContent as Record<string, unknown> | undefined;
         const contentBlocks = Array.isArray(result.content) ? result.content : [];
@@ -146,7 +157,7 @@ export async function createMCPClient(
           : mapMCPContentBlocks(contentBlocks);
 
         const meta: Omit<MCPResponseMeta, "source"> = {
-          isError: Boolean(result.isError),
+          isError: false,
           content: mapMCPContentBlocks(contentBlocks),
         };
         if (structuredContent != null) {

@@ -1,7 +1,7 @@
 import * as Type from "@alkdev/typebox";
 import { FromSchema } from "./from_schema.js";
 import { OperationType, type OperationSpec, type OperationHandler, type SubscriptionHandler, type OperationContext } from "./types.js";
-import { CallError } from "./error.js";
+import { CallError, InfrastructureErrorCode } from "./error.js";
 import { httpEnvelope } from "./response-envelope.js";
 
 export interface OpenAPIFS {
@@ -321,6 +321,7 @@ function createHTTPOperation(
 ): OperationSpec & { handler: HTTPOperationHandler } {
   const operationId = normalizeOperationId(operation, method, path);
   const opType = detectOperationType(method, operation);
+  const apiVersion = spec.info?.version || "1.0.0";
   const authHeaders = getAuthHeaders(config);
   const responseHeaders = (): Record<string, string> => ({ ...authHeaders, "Content-Type": "application/json" });
 
@@ -358,7 +359,7 @@ function createHTTPOperation(
       });
 
       if (!response.ok) {
-        throw new CallError("EXECUTION_ERROR", `HTTP ${response.status}: ${response.statusText}`);
+        throw new CallError(InfrastructureErrorCode.EXECUTION_ERROR, `HTTP ${response.status}: ${response.statusText}`);
       }
 
       const reader = response.body!.getReader();
@@ -398,7 +399,7 @@ function createHTTPOperation(
     return {
       name: operationId,
       namespace: config.namespace,
-      version: "1.0.0",
+      version: apiVersion,
       type: opType,
       description: operation.description || operation.summary || `${method.toUpperCase()} ${path}`,
       tags: operation.tags,
@@ -449,7 +450,7 @@ function createHTTPOperation(
     });
 
     if (!response.ok) {
-      throw new CallError("EXECUTION_ERROR", `HTTP ${response.status}: ${response.statusText}`);
+      throw new CallError(InfrastructureErrorCode.EXECUTION_ERROR, `HTTP ${response.status}: ${response.statusText}`);
     }
 
     const contentType = response.headers.get("Content-Type") || "";
@@ -472,7 +473,7 @@ function createHTTPOperation(
   return {
     name: operationId,
     namespace: config.namespace,
-    version: "1.0.0",
+    version: apiVersion,
     type: opType,
     description: operation.description || operation.summary || `${method.toUpperCase()} ${path}`,
     tags: operation.tags,
@@ -515,8 +516,15 @@ export async function FromOpenAPIFile(path: string, config: HTTPServiceConfig, f
   if (fs) {
     content = await fs.readFile(path);
   } else {
-    const { readFile } = await import("node:fs/promises");
-    content = await readFile(path, "utf-8");
+    try {
+      const { readFile } = await import("node:fs/promises");
+      content = await readFile(path, "utf-8");
+    } catch {
+      throw new CallError(InfrastructureErrorCode.EXECUTION_ERROR,
+        "FromOpenAPIFile: no filesystem provider given and node:fs/promises is not available. " +
+        "Provide an OpenAPIFS implementation via the third argument."
+      );
+    }
   }
   const spec = JSON.parse(content) as OpenAPISpec;
   return FromOpenAPI(spec, config);

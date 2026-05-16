@@ -14,7 +14,7 @@ export { CallError, InfrastructureErrorCode, mapError } from "./error.js";
 export type { CallErrorCode } from "./error.js";
 export { PendingRequestMap, buildCallHandler } from "./call.js";
 export type { CallEventMap, CallEventMapValue, CallRequestedEvent, CallRespondedEvent, CallAbortedEvent, CallErrorEvent, CallHandler, CallHandlerConfig } from "./call.js";
-export { checkAccess } from "./access.js";
+export { checkAccess, enforceAccess } from "./access.js";
 export { subscribe } from "./subscribe.js";
 export { defaultAdapter, zodAdapter, valibotAdapter } from "./from_typemap.js";
 export type { SchemaAdapter } from "./from_typemap.js";

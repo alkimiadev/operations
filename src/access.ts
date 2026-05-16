@@ -1,4 +1,5 @@
 import type { AccessControl, Identity } from "./types.js";
+import { CallError, InfrastructureErrorCode } from "./error.js";
 
 export function checkAccess(accessControl: AccessControl, identity: Identity): boolean {
   const { requiredScopes, requiredScopesAny, resourceType, resourceAction } = accessControl;
@@ -24,4 +25,30 @@ export function checkAccess(accessControl: AccessControl, identity: Identity): b
   }
 
   return true;
+}
+
+export function enforceAccess(
+  accessControl: AccessControl,
+  identity: Identity | undefined,
+  operationId: string,
+  trusted?: boolean,
+): void {
+  if (trusted) return;
+
+  if (accessControl.requiredScopes.length > 0 || accessControl.requiredScopesAny?.length || accessControl.resourceType) {
+    if (!identity) {
+      throw new CallError(
+        InfrastructureErrorCode.ACCESS_DENIED,
+        `Access denied for operation: ${operationId} — identity required`,
+        { operationId, requiredScopes: accessControl.requiredScopes },
+      );
+    }
+    if (!checkAccess(accessControl, identity)) {
+      throw new CallError(
+        InfrastructureErrorCode.ACCESS_DENIED,
+        `Access denied for operation: ${operationId}`,
+        { requiredScopes: accessControl.requiredScopes },
+      );
+    }
+  }
 }

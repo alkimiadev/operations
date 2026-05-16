@@ -1,8 +1,9 @@
-import type { OperationContext, AccessControl } from "./types.js";
+import type { OperationContext } from "./types.js";
 import { OperationRegistry } from "./registry.js";
 import { type ResponseEnvelope, isResponseEnvelope, localEnvelope } from "./response-envelope.js";
 import { CallError, InfrastructureErrorCode } from "./error.js";
-import { checkAccess } from "./access.js";
+import { enforceAccess } from "./access.js";
+import { validateOrThrow } from "./validation.js";
 
 export async function* subscribe(
   registry: OperationRegistry,
@@ -30,25 +31,9 @@ export async function* subscribe(
     );
   }
 
-  if (!context.trusted) {
-    const accessControl: AccessControl = spec.accessControl as AccessControl;
-    if (accessControl.requiredScopes.length > 0 || accessControl.requiredScopesAny?.length || accessControl.resourceType) {
-      if (!context.identity) {
-        throw new CallError(
-          InfrastructureErrorCode.ACCESS_DENIED,
-          `Access denied for operation: ${operationId} — identity required`,
-          { operationId, requiredScopes: accessControl.requiredScopes },
-        );
-      }
-      if (!checkAccess(accessControl, context.identity)) {
-        throw new CallError(
-          InfrastructureErrorCode.ACCESS_DENIED,
-          `Access denied for operation: ${operationId}`,
-          { requiredScopes: accessControl.requiredScopes },
-        );
-      }
-    }
-  }
+  enforceAccess(spec.accessControl, context.identity, operationId, context.trusted);
+
+  validateOrThrow(spec.inputSchema, input, `Input validation failed for ${operationId}`);
 
   const generator = handler(input, context) as AsyncGenerator<unknown, void, unknown>;
 
