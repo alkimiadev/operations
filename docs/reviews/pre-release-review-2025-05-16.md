@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Scope:** Full codebase review for issues that would impact downstream hub/spoke implementations
-**Status:** C-01 through C-05, H-01 through H-06, M-01 through M-03, M-05 through M-08, and L-01 through L-05 resolved. M-04 (call.completed signaling) and L-04 (SSE GET requestBody) deferred. M-02 resolved (subpath export added, OpenAPI re-exported from main entry removed).
+**Status:** C-01 through C-05, H-01 through H-06, M-01 through M-08, and L-01 through L-05 resolved. L-04 resolved.
 
 ---
 
@@ -129,13 +129,11 @@ Both adapters have access to version information (MCP server info, OpenAPI `info
 
 `CallRequestedEvent` schema now has both `deadline?: number` and `idleTimeout?: number` as optional fields. `PendingRequestMap.subscribe()` accepts `{ idleTimeout }` instead of `{ deadline }`. The idle timer is correctly reset on each event using the stored `idleTimeout` value.
 
-### M-04. No unsubscribe/completion signaling in call protocol
+### M-04. No unsubscribe/completion signaling in call protocol ✅ RESOLVED
 
-**File:** `src/call.ts:298-301`
+**File:** `src/call.ts`
 
-**Status:** DEFERRED — will be implemented in a dedicated session due to protocol-level impact.
-
-When a subscription ends (the `for await` loop completes), `buildCallHandler` simply stops calling `callMap.respond()`. There is no `call.completed` or `call.finished` event type to explicitly signal subscription completion. The consumer must detect iterator completion, which works with `Repeater` but may not work with all pubsub implementations.
+**Resolution:** Added `call.completed` event type to the call protocol. When a subscription's async generator finishes naturally, `buildCallHandler` now calls `callMap.complete(requestId)` which publishes a `call.completed` event. The `PendingRequestMap` handles this event by closing the consumer's Repeater iterator (for subscriptions) or rejecting the pending promise (for calls). Added `CallCompletedEvent` type and schema, `complete()` method on `PendingRequestMap`, and a pubsub listener for `call.completed` in `setupSubscriptions()`. The `consumerStopped` flag is set before `stop()` to prevent spurious `call.aborted` events.
 
 ### M-05. mapError uses fragile message.includes(code) matching ✅ RESOLVED
 
@@ -177,11 +175,11 @@ When a subscription ends (the `for await` loop completes), `buildCallHandler` si
 
 **Resolution:** Added `logger.warn()` call when the fallback `Type.Unknown()` is reached, logging the unrecognized schema via `JSON.stringify()`. Uses `@logtape/logtape` with category `"operations:from_schema"`, matching the existing pattern.
 
-### L-04. from_openapi.ts SSE GET includes requestBody handling
+### L-04. from_openapi.ts SSE handler now forwards requestBody ✅ RESOLVED
 
 **File:** `src/from_openapi.ts`
 
-**Status:** NOTED — The `else if (key === "body")` branch in the SSE handler silently accepts but does not forward body parameters. This is intentional for unusual SSE-over-POST use cases. No action needed; the behavior is self-documenting from the code structure.
+**Resolution:** The SSE subscription handler previously had an empty `else if (key === "body")` branch that silently dropped body parameters. Fixed by adding `body` variable extraction and forwarding it as a JSON request body (with `Content-Type: application/json` header) when present. This correctly supports SSE-over-POST patterns while preserving GET-without-body behavior for standard SSE endpoints.
 
 ### L-05. No convenience registerAll methods on MCP or OpenAPI adapters ✅ RESOLVED
 

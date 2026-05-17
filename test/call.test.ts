@@ -1162,7 +1162,6 @@ describe("CallHandler SUBSCRIPTION dispatch", () => {
     const consumePromise = (async () => {
       try {
         for await (const _ of subscribeIter) {
-          // should not reach
         }
       } catch (error) {
         caughtError = error;
@@ -1183,5 +1182,150 @@ describe("CallHandler SUBSCRIPTION dispatch", () => {
 
     expect(caughtError).toBeInstanceOf(CallError);
     expect((caughtError as CallError).code).toBe(InfrastructureErrorCode.ACCESS_DENIED);
+  });
+});
+
+describe("call.completed signaling", () => {
+  it("complete() closes subscription iterator", async () => {
+    const map = new PendingRequestMap();
+    let completedRequestId: string | undefined;
+
+    const completedIter = map["pubsub"].subscribe("call.completed", "");
+    const completedPromise = (async () => {
+      for await (const envelope of completedIter) {
+        completedRequestId = envelope.payload.requestId;
+        break;
+      }
+    })();
+
+    const subscribeIter = map.subscribe("test.stream", {});
+    let iterationCompleted = false;
+
+    const consumePromise = (async () => {
+      for await (const _ of subscribeIter) {
+      }
+      iterationCompleted = true;
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...map["entries"].keys()][0];
+
+    map.respond(requestId, localEnvelope("event1", "test.stream"));
+
+    await new Promise((r) => setTimeout(r, 20));
+    map.complete(requestId);
+
+    await consumePromise;
+    await completedPromise;
+
+    expect(iterationCompleted).toBe(true);
+    expect(completedRequestId).toBe(requestId);
+    expect(map.getPendingCount()).toBe(0);
+  });
+
+  it("buildCallHandler publishes call.completed when subscription generator finishes", async () => {
+    const registry = new OperationRegistry();
+    registry.register({
+      name: "finite",
+      namespace: "test",
+      version: "1.0.0",
+      type: OperationType.SUBSCRIPTION,
+      description: "finite stream",
+      inputSchema: Type.Object({}),
+      outputSchema: Type.Unknown(),
+      accessControl: { requiredScopes: [] },
+      handler: async function* (_input: unknown, _context: unknown) {
+        yield "a";
+        yield "b";
+      },
+    });
+
+    const callMap = new PendingRequestMap();
+    const handler = buildCallHandler({ registry, callMap });
+
+    let completedRequestId: string | undefined;
+    const completedIter = callMap["pubsub"].subscribe("call.completed", "");
+    const completedPromise = (async () => {
+      for await (const envelope of completedIter) {
+        completedRequestId = envelope.payload.requestId;
+        break;
+      }
+    })();
+
+    const subscribeIter = callMap.subscribe("test.finite", {});
+    const results: ResponseEnvelope[] = [];
+    const consumePromise = (async () => {
+      for await (const envelope of subscribeIter) {
+        results.push(envelope);
+      }
+    })();
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requestId = [...callMap["entries"].keys()][0];
+
+    await handler({
+      requestId,
+      operationId: "test.finite",
+      input: {},
+    });
+
+    await consumePromise;
+    await completedPromise;
+
+    expect(results).toHaveLength(2);
+    expect(results[0].data).toBe("a");
+    expect(results[1].data).toBe("b");
+    expect(completedRequestId).toBe(requestId);
+    expect(callMap.getPendingCount()).toBe(0);
+  });
+
+  it("complete() on a call entry rejects the pending promise", async () => {
+    const map = new PendingRequestMap();
+
+    let completedRequestId: string | undefined;
+    const completedIter = map["pubsub"].subscribe("call.completed", "");
+    const completedPromise = (async () => {
+      for await (const envelope of completedIter) {
+        completedRequestId = envelope.payload.requestId;
+        break;
+      }
+    })();
+
+    const callPromise = map.call("test.op", {});
+    const requestId = [...map["entries"].keys()][0];
+
+    map.complete(requestId);
+
+    await completedPromise;
+    expect(completedRequestId).toBe(requestId);
+
+    try {
+      await callPromise;
+      expect.fail("Should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CallError);
+      expect((error as CallError).code).toBe(InfrastructureErrorCode.ABORTED);
+      expect((error as CallError).message).toContain("completed without response");
+    }
+
+    expect(map.getPendingCount()).toBe(0);
+  });
+
+  it("complete() with invalid requestId still publishes event", async () => {
+    const map = new PendingRequestMap();
+
+    let completedReceived = false;
+    const completedIter = map["pubsub"].subscribe("call.completed", "");
+    const completedPromise = (async () => {
+      for await (const envelope of completedIter) {
+        completedReceived = true;
+        break;
+      }
+    })();
+
+    map.complete("nonexistent-id");
+
+    await completedPromise;
+    expect(completedReceived).toBe(true);
   });
 });

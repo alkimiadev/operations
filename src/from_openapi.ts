@@ -334,11 +334,13 @@ function createHTTPOperation(
 
       let urlPath = path;
       const queryParams: Record<string, string> = {};
+      let body: unknown = undefined;
 
       for (const [key, value] of Object.entries(inputObj)) {
         if (path.includes(`{${key}}`)) {
           urlPath = urlPath.replace(`{${key}}`, encodeURIComponent(String(value)));
         } else if (key === "body") {
+          body = value;
         } else {
           queryParams[key] = String(value);
         }
@@ -351,12 +353,14 @@ function createHTTPOperation(
 
       const headers: Record<string, string> = {
         ...authHeaders,
+        ...(body ? { "Content-Type": "application/json" } : {}),
         "Accept": "text/event-stream",
       };
 
       const response = await httpClient(url.toString(), {
         method: method.toUpperCase(),
         headers,
+        body: body ? JSON.stringify(body) : undefined,
         signal: config.timeout ? AbortSignal.timeout(config.timeout) : undefined,
       });
 

@@ -30,6 +30,9 @@ export const CallEventSchema = {
     requestId: Type.String(),
     output: ResponseEnvelopeSchema,
   }),
+  "call.completed": Type.Object({
+    requestId: Type.String(),
+  }),
   "call.aborted": Type.Object({
     requestId: Type.String(),
   }),
@@ -43,15 +46,17 @@ export const CallEventSchema = {
 
 export type CallRequestedEvent = Static<typeof CallEventSchema["call.requested"]>;
 export type CallRespondedEvent = Static<typeof CallEventSchema["call.responded"]>;
+export type CallCompletedEvent = Static<typeof CallEventSchema["call.completed"]>;
 export type CallAbortedEvent = Static<typeof CallEventSchema["call.aborted"]>;
 export type CallErrorEvent = Static<typeof CallEventSchema["call.error"]>;
-export type CallEventMapValue = CallRequestedEvent | CallRespondedEvent | CallAbortedEvent | CallErrorEvent;
+export type CallEventMapValue = CallRequestedEvent | CallRespondedEvent | CallCompletedEvent | CallAbortedEvent | CallErrorEvent;
 
 export const CallEventMap = CallEventSchema;
 
 type CallPubSubMap = {
   "call.requested": CallRequestedEvent;
   "call.responded": CallRespondedEvent;
+  "call.completed": CallCompletedEvent;
   "call.aborted": CallAbortedEvent;
   "call.error": CallErrorEvent;
 };
@@ -139,6 +144,27 @@ export class PendingRequestMap {
       }
     })().catch((error) => {
       logger.error(`call.error listener error: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    const completedIter = this.pubsub.subscribe("call.completed", "");
+    (async () => {
+      for await (const envelope of completedIter) {
+        const completed = envelope.payload;
+        const entry = this.entries.get(completed.requestId);
+        if (!entry) continue;
+
+        if (entry.type === "subscribe") {
+          if (entry.state.timer) clearTimeout(entry.state.timer);
+          entry.state.consumerStopped = true;
+          entry.state.stop();
+        } else {
+          if (entry.pending.timer) clearTimeout(entry.pending.timer);
+          entry.pending.reject(new CallError(InfrastructureErrorCode.ABORTED, `Request ${completed.requestId} completed without response`));
+        }
+        this.entries.delete(completed.requestId);
+      }
+    })().catch((error) => {
+      logger.error(`call.completed listener error: ${error instanceof Error ? error.message : String(error)}`);
     });
 
     const abortedIter = this.pubsub.subscribe("call.aborted", "");
@@ -267,6 +293,10 @@ export class PendingRequestMap {
     });
   }
 
+  complete(requestId: string): void {
+    this.pubsub.publish("call.completed", "", { requestId });
+  }
+
   abort(requestId: string): void {
     const entry = this.entries.get(requestId);
     if (!entry) return;
@@ -312,6 +342,7 @@ export function buildCallHandler(config: CallHandlerConfig): CallHandler {
         for await (const envelope of subscribe(registry, operationId, input, context)) {
           callMap.respond(requestId, envelope);
         }
+        callMap.complete(requestId);
       } else {
         const envelope = await registry.execute(operationId, input, context);
         callMap.respond(requestId, envelope);

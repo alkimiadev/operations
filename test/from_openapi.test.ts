@@ -579,7 +579,6 @@ describe("FromOpenAPI SUBSCRIPTION handler", () => {
 
     try {
       for await (const _ of handler({}, {} as any)) {
-        // should not reach
       }
       expect.fail("Expected CallError");
     } catch (error) {
@@ -587,5 +586,113 @@ describe("FromOpenAPI SUBSCRIPTION handler", () => {
       expect((error as CallError).code).toBe("EXECUTION_ERROR");
       expect((error as CallError).message).toContain("HTTP 500");
     }
+  });
+
+  it("SSE handler forwards body in request when provided", async () => {
+    const sseStream = "data: {\"ok\":true}\n\n";
+    const encoder = new TextEncoder();
+
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: encoder.encode(sseStream) })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      releaseLock: vi.fn(),
+    };
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "Content-Type": "text/event-stream" }),
+      body: { getReader: () => reader },
+    });
+    globalThis.fetch = fetchMock;
+
+    const specWithBody = {
+      openapi: "3.0.0",
+      info: { title: "Test", version: "1.0.0" },
+      paths: {
+        "/events": {
+          post: {
+            operationId: "postEvents",
+            description: "Post and stream events",
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: { type: "object", properties: { filter: { type: "string" } } },
+                },
+              },
+            },
+            responses: {
+              "200": {
+                content: {
+                  "text/event-stream": {
+                    schema: { type: "object", properties: { ok: { type: "boolean" } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const ops = FromOpenAPI(specWithBody as any, config);
+    const postEvents = ops.find((o) => o.name === "postEvents")!;
+    const handler = postEvents.handler as SubscriptionHandler<unknown, unknown, unknown>;
+
+    const results: unknown[] = [];
+    for await (const value of handler({ body: { filter: "important" } }, {} as any)) {
+      results.push(value);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const fetchArgs = fetchMock.mock.calls[0];
+    expect(fetchArgs[1].method).toBe("POST");
+    expect(fetchArgs[1].body).toBe(JSON.stringify({ filter: "important" }));
+    expect(fetchArgs[1].headers["Content-Type"]).toBe("application/json");
+
+    expect(results).toHaveLength(1);
+    if (isResponseEnvelope(results[0])) {
+      expect(results[0].data).toEqual({ ok: true });
+    }
+  });
+
+  it("SSE handler does not send body when input has no body key", async () => {
+    const sseStream = "data: {\"event\":\"ping\"}\n\n";
+    const encoder = new TextEncoder();
+
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: encoder.encode(sseStream) })
+        .mockResolvedValueOnce({ done: true, value: undefined }),
+      releaseLock: vi.fn(),
+    };
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "Content-Type": "text/event-stream" }),
+      body: { getReader: () => reader },
+    });
+    globalThis.fetch = fetchMock;
+
+    const ops = FromOpenAPI(simpleSpec as any, config);
+    const streamEvents = ops.find((o) => o.name === "streamEvents")!;
+    const handler = streamEvents.handler as SubscriptionHandler<unknown, unknown, unknown>;
+
+    const results: unknown[] = [];
+    for await (const value of handler({}, {} as any)) {
+      results.push(value);
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const fetchArgs = fetchMock.mock.calls[0];
+    expect(fetchArgs[1].method).toBe("GET");
+    expect(fetchArgs[1].body).toBeUndefined();
+    expect(fetchArgs[1].headers["Content-Type"]).toBeUndefined();
+
+    expect(results).toHaveLength(1);
   });
 });
