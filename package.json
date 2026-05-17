@@ -52,8 +52,17 @@
     "access": "public"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://git.alk.dev/alkdev/operations.git"
+  },
+  "homepage": "https://git.alk.dev/alkdev/operations",
+  "bugs": {
+    "url": "https://git.alk.dev/alkdev/operations/issues"
+  },
   "scripts": {
     "build": "tsup",
     "build:tsc": "tsc --noEmit",
